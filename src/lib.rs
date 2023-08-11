@@ -197,19 +197,82 @@ impl Table for Users {
 #[derive(FromRow)]
 struct TableName(String);
 
-fn tables_to_create(db_table_names: Vec<TableName>, tables: Vec<impl Table>) -> Vec<impl Table> {
+impl Table for TableName {
+    fn new() -> Self {
+        todo!()
+    }
+
+    fn name(&self) -> String {
+        todo!()
+    }
+
+    fn columns(&self) -> Vec<Column> {
+        todo!()
+    }
+
+    fn indexes(&self) -> Vec<Index> {
+        todo!()
+    }
+
+    fn create_table_sql(&self) -> String {
+        todo!()
+    }
+
+    fn drop_table_sql(&self) -> String {
+        format!("drop table {};", self.0)
+    }
+
+    fn add_column_sql(&self, column: Column) -> String {
+        todo!()
+    }
+
+    fn drop_column_sql(&self, column: Column) -> String {
+        todo!()
+    }
+
+    fn create_index_sql(&self, index: Index) -> String {
+        todo!()
+    }
+
+    fn drop_index_sql(&self, index: Index) -> String {
+        todo!()
+    }
+}
+
+fn tables_to_create<'a>(
+    db_table_names: &'a Vec<TableName>,
+    tables: &'a Vec<impl Table>,
+) -> Vec<&'a impl Table> {
     let sql_table_names: Vec<_> = db_table_names.iter().map(|table| &table.0).collect();
     tables
-        .into_iter()
+        .iter()
         .filter(|t| !sql_table_names.contains(&&t.name()))
         .collect::<Vec<_>>()
 }
 
-fn create_tables_sql(db_table_names: Vec<TableName>, tables: Vec<impl Table>) -> String {
-    let tables = tables_to_create(db_table_names, tables);
+fn create_tables_sql(tables: Vec<&impl Table>) -> String {
     tables
         .iter()
         .map(|table| table.create_table_sql())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tables_to_drop<'a>(
+    db_table_names: &'a Vec<TableName>,
+    tables: &'a Vec<impl Table>,
+) -> Vec<&'a TableName> {
+    let table_names: Vec<_> = tables.iter().map(|t| t.name()).collect();
+    db_table_names
+        .iter()
+        .filter(|t| !table_names.contains(&t.0))
+        .collect::<Vec<_>>()
+}
+
+fn drop_tables_sql(table_names: Vec<&TableName>) -> String {
+    table_names
+        .iter()
+        .map(|tn| tn.drop_table_sql())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -258,6 +321,17 @@ impl Database {
         let _ = self.pool.execute(sql).await?;
         Ok(())
     }
+
+    async fn sync(&self, tables: Vec<impl Table>) -> Result<(), sqlx::Error> {
+        let table_names = self.table_names().await;
+        let tables_to_create = tables_to_create(&table_names, &tables);
+        let create_tables_sql = create_tables_sql(tables_to_create);
+        let _ = self.execute(&create_tables_sql).await?;
+        let tables_to_drop = tables_to_drop(&table_names, &tables);
+        let drop_tables_sql = drop_tables_sql(tables_to_drop);
+        let _ = self.execute(&drop_tables_sql).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -266,13 +340,17 @@ mod tests {
 
     #[test]
     fn create_tables_sql_works() {
-        let sql = create_tables_sql(vec![], vec![Users::new()]);
+        let sql = create_tables_sql(vec![&Users::new()]);
         assert_eq!("create table users (id integer primary key, name text not null, created_at real not null, updated_at real not null);", sql)
     }
 
     #[test]
     fn create_tables_sql_with_existing_table_works() {
-        let sql = create_tables_sql(vec![TableName("users".to_string())], vec![Users::new()]);
+        let table_names = vec![TableName("users".to_string())];
+        let users = Users::new();
+        let tables = vec![users];
+        let tables_to_create = tables_to_create(&table_names, &tables);
+        let sql = create_tables_sql(tables_to_create);
         assert!(sql.is_empty())
     }
 
@@ -286,9 +364,48 @@ mod tests {
     #[tokio::test]
     async fn db_table_names_with_existing_table_works() {
         let db = Database::new("sqlite://:memory:".to_string()).await;
-        let sql = create_tables_sql(vec![], vec![Users::new()]);
+        let sql = create_tables_sql(vec![&Users::new()]);
         let _ = db.execute(&sql).await;
         let names: Vec<_> = db.table_names().await.into_iter().map(|tn| tn.0).collect();
         assert_eq!(vec!["users".to_string()], names)
+    }
+
+    #[test]
+    fn tables_to_drop_works() {
+        let expected = vec![TableName("users".to_string())];
+        let tables: Vec<TableName> = vec![];
+        let table_name: Vec<_> = tables_to_drop(&expected, &tables)
+            .iter()
+            .map(|tn| tn.0.clone())
+            .collect();
+        assert_eq!(table_name, vec!["users".to_string()])
+    }
+
+    #[test]
+    fn drop_tables_sql_works() {
+        let users = TableName("users".to_string());
+        let bobby_tables = vec![&users];
+        let drop_tables_sql = drop_tables_sql(bobby_tables);
+        assert_eq!("drop table users;", drop_tables_sql)
+    }
+
+    fn empty_tables() -> Vec<impl Table> {
+        let mut tables: Vec<_> = vec![TableName("".to_string())];
+        let _ = tables.pop();
+        tables
+    }
+
+    #[tokio::test]
+    async fn sync_with_drop_tables_works() -> Result<(), sqlx::Error> {
+        let users = Users::new();
+        let tables = vec![users];
+        let db = Database::new("sqlite://:memory:".to_string()).await;
+        let _ = db.sync(tables).await?;
+        let table_names = db.table_names().await;
+        assert_eq!(1, table_names.len());
+        let _ = db.sync(empty_tables()).await?;
+        let table_names = db.table_names().await;
+        assert!(table_names.is_empty());
+        Ok(())
     }
 }
