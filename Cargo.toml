@@ -10,3 +10,5 @@ members = [
 
 [dependencies]
 macros = { path = "macros" }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio"] }
+tokio = { version = "1.29.1", features = ["rt", "tokio-macros", "full"] }
