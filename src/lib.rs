@@ -1,3 +1,11 @@
+use std::time::Duration;
+
+use sqlx::{
+    query_as,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+    Executor, FromRow, SqlitePool,
+};
+
 #[derive(Default)]
 struct Column {
     default_value: Option<String>,
@@ -186,27 +194,19 @@ impl Table for Users {
     }
 }
 
-struct SqlTable {
-    columns: Vec<Column>,
-    indexes: Vec<Index>,
-    name: String,
-}
+#[derive(FromRow)]
+struct TableName(String);
 
-fn tables_to_create(sql_tables: Vec<SqlTable>, tables: Vec<impl Table>) -> Vec<impl Table> {
-    let sql_table_names: Vec<_> = sql_tables.iter().map(|table| table.name.clone()).collect();
+fn tables_to_create(db_table_names: Vec<TableName>, tables: Vec<impl Table>) -> Vec<impl Table> {
+    let sql_table_names: Vec<_> = db_table_names.iter().map(|table| &table.0).collect();
     tables
         .into_iter()
-        .filter(|t| !sql_table_names.contains(&t.name()))
+        .filter(|t| !sql_table_names.contains(&&t.name()))
         .collect::<Vec<_>>()
 }
 
-fn sql_tables() -> Vec<SqlTable> {
-    vec![]
-}
-
-fn create_tables_sql(tables: Vec<impl Table>) -> String {
-    let sql_tables = sql_tables();
-    let tables = tables_to_create(sql_tables, tables);
+fn create_tables_sql(db_table_names: Vec<TableName>, tables: Vec<impl Table>) -> String {
+    let tables = tables_to_create(db_table_names, tables);
     tables
         .iter()
         .map(|table| table.create_table_sql())
@@ -214,13 +214,81 @@ fn create_tables_sql(tables: Vec<impl Table>) -> String {
         .join("\n")
 }
 
+#[derive(Clone)]
+struct Database {
+    pool: SqlitePool,
+}
+
+impl Database {
+    pub async fn new(filename: String) -> Self {
+        Self {
+            pool: Self::pool(&filename).await,
+        }
+    }
+
+    async fn pool(filename: &str) -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(Self::connection_options(filename))
+            .await
+            .unwrap()
+    }
+
+    fn connection_options(filename: &str) -> SqliteConnectOptions {
+        let options: SqliteConnectOptions = filename.parse().unwrap();
+        options
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(30))
+    }
+
+    async fn table_names(&self) -> Vec<TableName> {
+        if let Ok(table_names) = query_as("select name from sqlite_schema where type = 'table'")
+            .fetch_all(&self.pool)
+            .await
+        {
+            table_names
+        } else {
+            vec![]
+        }
+    }
+
+    async fn execute(&self, sql: &str) -> Result<(), sqlx::Error> {
+        let _ = self.pool.execute(sql).await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn migrate_with_create_table_works() {
-        let sql = create_tables_sql(vec![Users::new()]);
+    fn create_tables_sql_works() {
+        let sql = create_tables_sql(vec![], vec![Users::new()]);
         assert_eq!("create table users (id integer primary key, name text not null, created_at real not null, updated_at real not null);", sql)
+    }
+
+    #[test]
+    fn create_tables_sql_with_existing_table_works() {
+        let sql = create_tables_sql(vec![TableName("users".to_string())], vec![Users::new()]);
+        assert!(sql.is_empty())
+    }
+
+    #[tokio::test]
+    async fn db_table_names_works() {
+        let db = Database::new("sqlite://:memory:".to_string()).await;
+        let db_table_names = db.table_names().await;
+        assert!(db_table_names.is_empty())
+    }
+
+    #[tokio::test]
+    async fn db_table_names_with_existing_table_works() {
+        let db = Database::new("sqlite://:memory:".to_string()).await;
+        let sql = create_tables_sql(vec![], vec![Users::new()]);
+        let _ = db.execute(&sql).await;
+        let names: Vec<_> = db.table_names().await.into_iter().map(|tn| tn.0).collect();
+        assert_eq!(vec!["users".to_string()], names)
     }
 }
