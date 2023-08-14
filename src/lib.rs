@@ -1,3 +1,4 @@
+#![allow(unused)]
 use sqlx::{
     query_as,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -232,7 +233,7 @@ impl Table for Users {
     }
 }
 
-#[derive(FromRow)]
+#[derive(FromRow, Debug)]
 struct TableName(String);
 
 impl Table for TableName {
@@ -301,12 +302,12 @@ fn drop_tables_sql(table_names: Vec<&TableName>) -> String {
 
 fn columns_to_add(db_columns: Vec<Column>, code_columns: Vec<Column>) -> Vec<Column> {
     let db_column_names = db_columns.iter().map(|c| c.full_name()).collect::<Vec<_>>();
-    dbg!(&db_column_names);
+    // dbg!(&db_column_names);
     let code_column_names = &code_columns
         .iter()
         .map(|c| c.full_name())
         .collect::<Vec<_>>();
-    dbg!(&code_column_names);
+    // dbg!(&code_column_names);
     let result = code_columns
         .into_iter()
         .filter(|c| !db_column_names.contains(&c.full_name()))
@@ -394,6 +395,8 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use crate::sqlite::Text;
+
     use super::*;
 
     async fn db() -> Database {
@@ -471,115 +474,31 @@ mod tests {
         Ok(())
     }
 
-    // #[derive(Table)]
-    // #[rizzle(table_name = "table_a")]
-    struct TableA {
+    use macros::Table;
+    #[derive(Table)]
+    #[rizzle(table_name = "a_table")]
+    struct A {
         a: sqlite::Text,
     }
 
-    impl Table for TableA {
-        fn new() -> Self {
-            Self { a: "a" }
-        }
-
-        fn name(&self) -> String {
-            "table_a".to_string()
-        }
-
-        fn columns(&self) -> Vec<Column> {
-            vec![Column {
-                table_name: self.name(),
-                name: "a".to_owned(),
-                data_type: sqlite::DataType::Text,
-                ..Default::default()
-            }]
-        }
-
-        fn indexes(&self) -> Vec<Index> {
-            todo!()
-        }
-
-        fn create_table_sql(&self) -> String {
-            format!(
-                "create table {} ({});",
-                self.name(),
-                self.columns()
-                    .iter()
-                    .map(|c| c.definition_sql())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-
-        fn drop_table_sql(&self) -> String {
-            format!("drop table {}", self.name())
-        }
-    }
-
-    //#[derive(Table)]
-    // #[rizzle(table_name = "table_a")]
-    struct TableA2 {
+    #[derive(Table)]
+    #[rizzle(table_name = "a_table")]
+    struct A2 {
+        #[rizzle(primary_key)]
         a: sqlite::Text,
+        #[rizzle(not_null)]
         b: sqlite::Text,
-    }
-
-    impl Table for TableA2 {
-        fn new() -> Self {
-            Self { a: "a", b: "b" }
-        }
-
-        fn name(&self) -> String {
-            // this comes from rizzle(table_name = "table_a") attribute
-            "table_a".to_string()
-        }
-
-        fn columns(&self) -> Vec<Column> {
-            vec![
-                Column {
-                    table_name: self.name(),
-                    name: "a".to_owned(),
-                    data_type: sqlite::DataType::Text,
-                    ..Default::default()
-                },
-                Column {
-                    table_name: self.name(),
-                    name: "b".to_owned(),
-                    data_type: sqlite::DataType::Text,
-                    ..Default::default()
-                },
-            ]
-        }
-
-        fn indexes(&self) -> Vec<Index> {
-            todo!()
-        }
-
-        fn create_table_sql(&self) -> String {
-            format!(
-                "create table {} ({});",
-                self.name(),
-                self.columns()
-                    .iter()
-                    .map(|c| c.definition_sql())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-
-        fn drop_table_sql(&self) -> String {
-            format!("drop table {}", self.name())
-        }
     }
 
     #[tokio::test]
     async fn sync_with_added_columns_works() -> Result<(), sqlx::Error> {
-        let a = TableA::new();
+        let a = A::new();
         let tables = vec![a];
         let db = db().await;
         let _ = db.sync(tables).await?;
         let table_names = db.table_names().await;
         assert_eq!(1, table_names.len());
-        let a2 = TableA2::new();
+        let a2 = A2::new();
         let tables = vec![a2];
         let _ = db.sync(tables).await?;
         let table_names = db.table_names().await;
