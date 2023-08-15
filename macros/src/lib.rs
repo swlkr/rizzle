@@ -1,4 +1,5 @@
-use proc_macro::TokenStream;
+use proc_macro::{Span, TokenStream};
+use proc_macro2::Span as Span2;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
 use syn::{
@@ -29,13 +30,21 @@ impl Parse for RizzleAttr {
         while !input.is_empty() {
             let next = input.parse::<Ident>()?.to_string();
             match next.as_str() {
-                "table_name" => {
+                "table" => {
                     let _ = input.parse::<Token![=]>()?;
                     let table_name: LitStr = input.parse()?;
                     rizzle_attr.table_name = Some(table_name);
                 }
                 "primary_key" => {
                     rizzle_attr.primary_key = true;
+                }
+                "not_null" => {
+                    rizzle_attr.not_null = true;
+                }
+                "default" => {
+                    let _ = input.parse::<Token![=]>()?;
+                    let default_value: LitStr = input.parse()?;
+                    rizzle_attr.default_value = Some(default_value);
                 }
                 _ => {}
             }
@@ -117,11 +126,12 @@ fn columns(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
     fields
         .iter()
         .map(|field| {
-            let primary_key = field
+            let attr = field
                 .attrs
                 .iter()
                 .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
-                .any(|attr| attr.primary_key);
+                .last()
+                .unwrap_or_default();
             let ident = &field
                 .ident
                 .as_ref()
@@ -139,12 +149,24 @@ fn columns(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
                 },
                 _ => todo!(),
             };
+            let RizzleAttr {
+                primary_key,
+                not_null,
+                default_value,
+                ..
+            } = attr;
+            let default_value = match default_value {
+                Some(default) => default,
+                None => LitStr::new("", Span2::call_site()),
+            };
             quote! {
                 Column {
                     table_name: #table_name.to_string(),
                     name: #ident.to_string(),
                     data_type: #ty,
                     primary_key: #primary_key,
+                    not_null: #not_null,
+                    default_value: Some(#default_value.to_string()),
                     ..Default::default()
                 }
             }

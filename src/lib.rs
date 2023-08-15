@@ -146,7 +146,7 @@ pub mod sqlite {
 
 // #[derive(Table)]
 struct Users {
-    // #[column(pk)]
+    // #[rizzle(primary_key)]
     id: sqlite::Integer,
     // #[column(not_null)]
     name: sqlite::Text,
@@ -476,13 +476,13 @@ mod tests {
 
     use macros::Table;
     #[derive(Table)]
-    #[rizzle(table_name = "a_table")]
+    #[rizzle(table = "a_table")]
     struct A {
         a: sqlite::Text,
     }
 
     #[derive(Table)]
-    #[rizzle(table_name = "a_table")]
+    #[rizzle(table = "a_table")]
     struct A2 {
         #[rizzle(primary_key)]
         a: sqlite::Text,
@@ -506,5 +506,11 @@ mod tests {
         let columns = db.columns().await;
         assert_eq!(2, columns.len());
         Ok(())
+    }
+
+    #[test]
+    fn rizzle_table_name_works() {
+        let a = A::new();
+        assert_eq!("create table a_table (a text )", a.create_table_sql())
     }
 }
