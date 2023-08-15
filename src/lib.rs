@@ -101,8 +101,23 @@ impl From<ColumnDef> for Column {
 
 #[derive(Default)]
 struct Index {
+    table_name: String,
     name: String,
-    columns: Vec<Column>,
+    index_type: sqlite::IndexType,
+    column_names: &'static str,
+}
+
+impl Index {
+    fn create_index_sql(&self) -> String {
+        let unique = match &self.index_type {
+            sqlite::IndexType::Plain => " ",
+            sqlite::IndexType::Unique => " unique ",
+        };
+        format!(
+            "create{}index {} on {}({})",
+            unique, self.name, self.table_name, self.column_names
+        )
+    }
 }
 
 trait Table {
@@ -112,6 +127,7 @@ trait Table {
     fn indexes(&self) -> Vec<Index>;
     fn create_table_sql(&self) -> String;
     fn drop_table_sql(&self) -> String;
+    fn create_indexes_sql(&self) -> String;
 }
 
 pub mod sqlite {
@@ -141,6 +157,13 @@ pub mod sqlite {
             };
             f.write_str(result)
         }
+    }
+
+    #[derive(Default, PartialEq, Debug)]
+    pub enum IndexType {
+        #[default]
+        Plain,
+        Unique,
     }
 }
 
@@ -208,13 +231,10 @@ impl Table for Users {
 
     fn indexes(&self) -> Vec<Index> {
         vec![Index {
+            table_name: "users".to_string(),
             name: "name_idx".to_string(),
-            columns: vec![Column {
-                name: "name".to_string(),
-                not_null: false,
-                data_type: sqlite::DataType::Text,
-                ..Default::default()
-            }],
+            index_type: sqlite::IndexType::Unique,
+            column_names: "name",
         }]
     }
 
@@ -229,6 +249,10 @@ impl Table for Users {
     }
 
     fn drop_table_sql(&self) -> String {
+        todo!()
+    }
+
+    fn create_indexes_sql(&self) -> String {
         todo!()
     }
 }
@@ -259,6 +283,10 @@ impl Table for TableName {
 
     fn drop_table_sql(&self) -> String {
         format!("drop table {};", self.0)
+    }
+
+    fn create_indexes_sql(&self) -> String {
+        todo!()
     }
 }
 
@@ -511,6 +539,30 @@ mod tests {
     #[test]
     fn rizzle_table_name_works() {
         let a = A::new();
-        assert_eq!("create table a_table (a text )", a.create_table_sql())
+        assert_eq!("create table a_table (a text)", a.create_table_sql())
+    }
+
+    #[derive(Table)]
+    #[rizzle(table = "index_table")]
+    struct IndexTable {
+        #[rizzle(primary_key)]
+        id: sqlite::Integer,
+        #[rizzle(not_null)]
+        name: sqlite::Text,
+        #[rizzle(columns = "name")]
+        name_index: sqlite::UniqueIndex,
+    }
+
+    #[test]
+    fn rizzle_indexes_works() {
+        let index_table = IndexTable::new();
+        assert_eq!(
+            "create table index_table (id integer primary key, name text not null)",
+            index_table.create_table_sql()
+        );
+        assert_eq!(
+            "create unique index name_index on index_table(name)",
+            index_table.create_indexes_sql()
+        )
     }
 }

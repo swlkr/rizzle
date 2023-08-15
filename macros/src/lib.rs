@@ -2,6 +2,7 @@ use proc_macro::{Span, TokenStream};
 use proc_macro2::Span as Span2;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
+use syn::Field;
 use syn::{
     parse::Parse, parse_macro_input, DeriveInput, Fields, Ident, LitStr, PathSegment, Result,
     Token, TypePath,
@@ -22,6 +23,7 @@ struct RizzleAttr {
     primary_key: bool,
     not_null: bool,
     default_value: Option<LitStr>,
+    columns: Option<LitStr>,
 }
 
 impl Parse for RizzleAttr {
@@ -45,6 +47,11 @@ impl Parse for RizzleAttr {
                     let _ = input.parse::<Token![=]>()?;
                     let default_value: LitStr = input.parse()?;
                     rizzle_attr.default_value = Some(default_value);
+                }
+                "columns" => {
+                    let _ = input.parse::<Token![=]>()?;
+                    let columns: LitStr = input.parse()?;
+                    rizzle_attr.columns = Some(columns);
                 }
                 _ => {}
             }
@@ -71,6 +78,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
     };
     let columns = columns(&table_name, &fields);
     let attrs = attrs(&fields);
+    let indexes = indexes(&table_name, &fields);
 
     Ok(quote! {
         impl Table for #struct_name {
@@ -87,7 +95,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
             }
 
             fn indexes(&self) -> Vec<Index> {
-                vec![]
+                vec![#(#indexes,)*]
             }
 
             fn create_table_sql(&self) -> String {
@@ -101,6 +109,14 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
 
             fn drop_table_sql(&self) -> String {
                 format!("drop table {}", self.name())
+            }
+
+            fn create_indexes_sql(&self) -> String {
+                self.indexes()
+                    .iter()
+                    .map(|i| i.create_index_sql())
+                    .collect::<Vec<_>>()
+                    .join(";")
             }
         }
     })
@@ -122,9 +138,84 @@ fn attrs(fields: &Fields) -> Vec<TokenStream2> {
         .collect::<Vec<_>>()
 }
 
+fn data_type_from_field(field: &Field) -> TokenStream2 {
+    match &field.ty {
+        syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
+            Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
+                "Real" => quote! { sqlite::DataType::Real },
+                "Integer" => quote! { sqlite::DataType::Integer },
+                "Text" => quote! { sqlite::DataType::Text },
+                _ => quote! { sqlite::DataType::Blob },
+            },
+            None => todo!(),
+        },
+        _ => todo!(),
+    }
+}
+
 fn columns(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
     fields
         .iter()
+        .filter(|field| match &field.ty {
+            syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
+                Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
+                    "Real" | "Integer" | "Text" | "Blob" => true,
+                    _ => false,
+                },
+                None => false,
+            },
+            _ => false,
+        })
+        .map(|field| {
+            let attr = field
+                .attrs
+                .iter()
+                .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
+                .last()
+                .unwrap_or_default();
+            let ident = &field
+                .ident
+                .as_ref()
+                .expect("Struct fields should have names")
+                .to_string();
+            let RizzleAttr {
+                primary_key,
+                not_null,
+                default_value,
+                ..
+            } = attr;
+            let default_value = match default_value {
+                Some(default) => quote! { Some(#default) },
+                None => quote! { None },
+            };
+            let ty = data_type_from_field(&field);
+            quote! {
+                Column {
+                    table_name: #table_name.to_string(),
+                    name: #ident.to_string(),
+                    data_type: #ty,
+                    primary_key: #primary_key,
+                    not_null: #not_null,
+                    default_value: #default_value
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn indexes(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
+    fields
+        .iter()
+        .filter(|field| match &field.ty {
+            syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
+                Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
+                    "Index" | "UniqueIndex" => true,
+                    _ => false,
+                },
+                None => false,
+            },
+            _ => false,
+        })
         .map(|field| {
             let attr = field
                 .attrs
@@ -140,34 +231,24 @@ fn columns(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
             let ty = match &field.ty {
                 syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
                     Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
-                        "Real" => quote! { sqlite::DataType::Real },
-                        "Integer" => quote! { sqlite::DataType::Integer },
-                        "Text" => quote! { sqlite::DataType::Text },
-                        _ => quote! { sqlite::DataType::Blob },
+                        "Index" => quote! { sqlite::IndexType::Plain },
+                        "UniqueIndex" => quote! { sqlite::IndexType::Unique },
+                        _ => unimplemented!(),
                     },
-                    None => todo!(),
+                    None => unimplemented!(),
                 },
-                _ => todo!(),
+                _ => unimplemented!(),
             };
-            let RizzleAttr {
-                primary_key,
-                not_null,
-                default_value,
-                ..
-            } = attr;
-            let default_value = match default_value {
-                Some(default) => default,
+            let column_names = match attr.columns {
+                Some(lit) => lit,
                 None => LitStr::new("", Span2::call_site()),
             };
             quote! {
-                Column {
+                Index {
                     table_name: #table_name.to_string(),
                     name: #ident.to_string(),
-                    data_type: #ty,
-                    primary_key: #primary_key,
-                    not_null: #not_null,
-                    default_value: Some(#default_value.to_string()),
-                    ..Default::default()
+                    index_type: #ty,
+                    column_names: #column_names,
                 }
             }
         })
