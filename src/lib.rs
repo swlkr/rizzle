@@ -4,7 +4,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Executor, FromRow, SqlitePool,
 };
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 #[derive(FromRow)]
 struct ColumnDef {
@@ -54,7 +54,7 @@ impl Column {
         .join(" ")
     }
 
-    fn add_column_sql(&self) -> String {
+    fn add_sql(&self) -> String {
         format!(
             "alter table {} add column {};",
             self.table_name,
@@ -64,6 +64,10 @@ impl Column {
 
     fn full_name(&self) -> String {
         format!("{} {}", self.table_name, self.name)
+    }
+
+    fn drop_sql(&self) -> String {
+        format!("alter table {} drop column {}", self.table_name, self.name)
     }
 }
 
@@ -121,7 +125,9 @@ impl Index {
 }
 
 trait Table {
-    fn new() -> Self;
+    fn new() -> Self
+    where
+        Self: Sized;
     fn name(&self) -> String;
     fn columns(&self) -> Vec<Column>;
     fn indexes(&self) -> Vec<Index>;
@@ -260,96 +266,8 @@ impl Table for Users {
 #[derive(FromRow, Debug)]
 struct TableName(String);
 
-impl Table for TableName {
-    fn new() -> Self {
-        todo!()
-    }
-
-    fn name(&self) -> String {
-        todo!()
-    }
-
-    fn columns(&self) -> Vec<Column> {
-        todo!()
-    }
-
-    fn indexes(&self) -> Vec<Index> {
-        todo!()
-    }
-
-    fn create_table_sql(&self) -> String {
-        todo!()
-    }
-
-    fn drop_table_sql(&self) -> String {
-        format!("drop table {};", self.0)
-    }
-
-    fn create_indexes_sql(&self) -> String {
-        todo!()
-    }
-}
-
-fn tables_to_create<'a>(
-    db_table_names: &'a Vec<TableName>,
-    tables: &'a Vec<impl Table>,
-) -> Vec<&'a impl Table> {
-    let db_table_names: Vec<_> = db_table_names.iter().map(|table| &table.0).collect();
-    tables
-        .iter()
-        .filter(|t| !db_table_names.contains(&&t.name()))
-        .collect::<Vec<_>>()
-}
-
-fn create_tables_sql(tables: Vec<&impl Table>) -> String {
-    tables
-        .iter()
-        .map(|table| table.create_table_sql())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn tables_to_drop<'a>(
-    db_table_names: &'a Vec<TableName>,
-    tables: &'a Vec<impl Table>,
-) -> Vec<&'a TableName> {
-    let table_names: Vec<_> = tables.iter().map(|t| t.name()).collect();
-    db_table_names
-        .iter()
-        .filter(|t| !table_names.contains(&t.0))
-        .collect::<Vec<_>>()
-}
-
-fn drop_tables_sql(table_names: Vec<&TableName>) -> String {
-    table_names
-        .iter()
-        .map(|tn| tn.drop_table_sql())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn columns_to_add(db_columns: Vec<Column>, code_columns: Vec<Column>) -> Vec<Column> {
-    let db_column_names = db_columns.iter().map(|c| c.full_name()).collect::<Vec<_>>();
-    // dbg!(&db_column_names);
-    let code_column_names = &code_columns
-        .iter()
-        .map(|c| c.full_name())
-        .collect::<Vec<_>>();
-    // dbg!(&code_column_names);
-    let result = code_columns
-        .into_iter()
-        .filter(|c| !db_column_names.contains(&c.full_name()))
-        .collect();
-    result
-}
-
-fn add_columns_sql(columns: Vec<Column>) -> String {
-    columns
-        .iter()
-        .map(|c| c.add_column_sql())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+#[derive(FromRow, Debug)]
+struct IndexName(String);
 
 #[derive(Clone)]
 struct Database {
@@ -391,6 +309,17 @@ impl Database {
         }
     }
 
+    async fn index_names(&self) -> Vec<IndexName> {
+        if let Ok(names) = query_as("select name from sqlite_schema where type = 'index'")
+            .fetch_all(&self.pool)
+            .await
+        {
+            names
+        } else {
+            vec![]
+        }
+    }
+
     async fn columns(&self) -> Vec<Column> {
         let column_defs: Vec<ColumnDef> = sqlx::query_as("select s.name as table_name, pti.name as name, pti.type as data_type, pti.pk as primary_key, pti.dflt_value as default_value, pti.[notnull] as not_null from sqlite_schema s left outer join pragma_table_info((s.name)) pti on pti.name <> s.name where s.type = 'table'").fetch_all(&self.pool).await.unwrap();
         column_defs
@@ -404,23 +333,150 @@ impl Database {
         Ok(())
     }
 
-    async fn sync(&self, tables: Vec<impl Table>) -> Result<(), sqlx::Error> {
+    /// sync given a vector of impl Table will migrate the database to a new state
+    async fn sync(&self, tables: Vec<&dyn Table>) -> Result<(), sqlx::Error> {
+        // 6 parts:
+        // create tables
+        // drop tables
+        // add columns
+        // drop columns
+        // create indexes
+        // drop indexes
+
         let table_names = self.table_names().await;
-        let tables_to_create = tables_to_create(&table_names, &tables);
-        let create_tables_sql = create_tables_sql(tables_to_create);
+        let create_tables_sql = create_tables_sql(&table_names, &tables);
         let _ = self.execute(&create_tables_sql).await?;
-        let tables_to_drop = tables_to_drop(&table_names, &tables);
-        let drop_tables_sql = drop_tables_sql(tables_to_drop);
+
+        let table_names = self.table_names().await;
+        let drop_tables_sql = drop_tables_sql(&table_names, &tables);
         let _ = self.execute(&drop_tables_sql).await?;
+
         let db_columns = self.columns().await;
-        let new_columns = tables.iter().flat_map(|t| t.columns()).collect::<Vec<_>>();
+        let new_columns: Vec<_> = tables.iter().flat_map(|t| t.columns()).collect();
         let columns_to_add = columns_to_add(db_columns, new_columns);
         let add_columns_sql = add_columns_sql(columns_to_add);
         let _ = self.execute(&add_columns_sql).await?;
+
+        let db_columns = self.columns().await;
+        let new_columns: Vec<_> = tables.iter().flat_map(|t| t.columns()).collect();
+        let drop_columns_sql = drop_columns_sql(db_columns, new_columns);
+        let _ = self.execute(&drop_columns_sql).await?;
+
+        let index_names = self
+            .index_names()
+            .await
+            .into_iter()
+            .map(|idx| idx.0)
+            .collect::<Vec<_>>();
+        let create_indexes_sql = create_indexes_sql(&tables, index_names);
+        let _ = self.execute(&create_indexes_sql).await?;
+
+        let index_names = self
+            .index_names()
+            .await
+            .into_iter()
+            .map(|idx| idx.0)
+            .collect::<Vec<_>>();
+        let drop_indexes_sql = drop_indexes_sql(tables, index_names);
+        let _ = self.execute(&drop_indexes_sql);
+
         Ok(())
     }
 }
 
+/// sync! macro helper for db migrations
+///
+/// Example:
+///
+/// let db = Database::new("sqlite://:memory:").await;
+/// #[derive(Table)]
+/// #[rizzle(table = "posts")]
+/// struct Posts {
+///   #[rizzle(primary_key)]
+///   id: sqlite::Integer,
+/// }
+/// let posts = Posts::new();
+/// if let Ok(_) = sync!(db, posts).await {}
+macro_rules! sync {
+    ($db:ident $(, $tables:expr)*) => {{
+        $db.sync(vec![$(&$tables)*])
+    }};
+}
+
+fn drop_indexes_sql(tables: Vec<&dyn Table>, index_names: Vec<String>) -> String {
+    let index_arr = tables
+        .into_iter()
+        .flat_map(|t| t.indexes())
+        .map(|i| i.name)
+        .collect::<Vec<_>>();
+    index_names
+        .iter()
+        .filter(|name| !index_arr.contains(&name))
+        .map(|i| format!("drop index {}", i))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn create_indexes_sql(tables: &Vec<&dyn Table>, index_names: Vec<String>) -> String {
+    tables
+        .iter()
+        .flat_map(|t| t.indexes())
+        .filter(|i| !index_names.contains(&i.name))
+        .map(|i| i.create_index_sql())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn create_tables_sql(table_names: &Vec<TableName>, tables: &Vec<&dyn Table>) -> String {
+    let table_names = table_names.into_iter().map(|tn| &tn.0).collect::<Vec<_>>();
+    tables
+        .iter()
+        .filter(|t| !table_names.contains(&&t.name()))
+        .map(|table| table.create_table_sql())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn drop_tables_sql(table_names: &Vec<TableName>, tables: &Vec<&dyn Table>) -> String {
+    let mig_table_names = tables.iter().map(|table| table.name()).collect::<Vec<_>>();
+    table_names
+        .iter()
+        .filter(|table_name| !mig_table_names.contains(&table_name.0))
+        .map(|t| format!("drop table {};", t.0))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn columns_to_add(db_columns: Vec<Column>, code_columns: Vec<Column>) -> Vec<Column> {
+    let db_column_names = db_columns.iter().map(|c| c.full_name()).collect::<Vec<_>>();
+    let code_column_names = &code_columns
+        .iter()
+        .map(|c| c.full_name())
+        .collect::<Vec<_>>();
+    // dbg!(&code_column_names);
+    let result = code_columns
+        .into_iter()
+        .filter(|c| !db_column_names.contains(&c.full_name()))
+        .collect();
+    result
+}
+
+fn add_columns_sql(columns: Vec<Column>) -> String {
+    columns
+        .iter()
+        .map(|c| c.add_sql())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String {
+    db_columns
+        .iter()
+        .filter(|col| !new_columns.contains(&col))
+        .map(|col| col.drop_sql())
+        .collect::<Vec<_>>()
+        .join(";")
+}
 #[cfg(test)]
 mod tests {
     use crate::sqlite::Text;
@@ -431,88 +487,55 @@ mod tests {
         Database::new("sqlite://:memory:".to_string()).await
     }
 
-    #[test]
-    fn create_tables_sql_works() {
-        let sql = create_tables_sql(vec![&Users::new()]);
-        assert_eq!("create table users (id integer primary key, name text not null, created_at real not null, updated_at real not null);", sql)
-    }
-
-    #[test]
-    fn create_tables_sql_with_existing_table_works() {
-        let table_names = vec![TableName("users".to_string())];
-        let users = Users::new();
-        let tables = vec![users];
-        let tables_to_create = tables_to_create(&table_names, &tables);
-        let sql = create_tables_sql(tables_to_create);
-        assert!(sql.is_empty())
-    }
-
     #[tokio::test]
-    async fn db_table_names_works() {
-        let db = Database::new("sqlite://:memory:".to_string()).await;
-        let db_table_names = db.table_names().await;
-        assert!(db_table_names.is_empty())
-    }
-
-    #[tokio::test]
-    async fn db_table_names_with_existing_table_works() {
+    async fn sync_new_tables_works() {
         let db = db().await;
-        let sql = create_tables_sql(vec![&Users::new()]);
-        let _ = db.execute(&sql).await;
-        let names: Vec<_> = db.table_names().await.into_iter().map(|tn| tn.0).collect();
-        assert_eq!(vec!["users".to_string()], names)
-    }
-
-    #[test]
-    fn tables_to_drop_works() {
-        let expected = vec![TableName("users".to_string())];
-        let tables: Vec<TableName> = vec![];
-        let table_name: Vec<_> = tables_to_drop(&expected, &tables)
-            .iter()
-            .map(|tn| tn.0.clone())
-            .collect();
-        assert_eq!(table_name, vec!["users".to_string()])
-    }
-
-    #[test]
-    fn drop_tables_sql_works() {
-        let users = TableName("users".to_string());
-        let bobby_tables = vec![&users];
-        let drop_tables_sql = drop_tables_sql(bobby_tables);
-        assert_eq!("drop table users;", drop_tables_sql)
-    }
-
-    fn empty_tables() -> Vec<impl Table> {
-        let mut tables: Vec<_> = vec![TableName("".to_string())];
-        let _ = tables.pop();
-        tables
+        let a = A::new();
+        assert_eq!(0, db.table_names().await.len());
+        db.sync(vec![&a]).await;
+        assert_eq!(1, db.table_names().await.len())
     }
 
     #[tokio::test]
-    async fn sync_with_drop_tables_works() -> Result<(), sqlx::Error> {
-        let users = Users::new();
-        let tables = vec![users];
+    async fn sync_new_tables_is_idempotent_works() {
         let db = db().await;
-        let _ = db.sync(tables).await?;
-        let table_names = db.table_names().await;
-        assert_eq!(1, table_names.len());
-        let _ = db.sync(empty_tables()).await?;
-        let table_names = db.table_names().await;
-        assert!(table_names.is_empty());
-        Ok(())
+        let a = A::new();
+        assert_eq!(0, db.table_names().await.len());
+        db.sync(vec![&a]).await;
+        assert_eq!(1, db.table_names().await.len());
+        db.sync(vec![&a]).await;
+        assert_eq!(1, db.table_names().await.len())
+    }
+
+    #[tokio::test]
+    async fn sync_with_dropped_tables_works() {
+        let db = db().await;
+        let a = A::new();
+        let b = B::new();
+        db.sync(vec![&a, &b]).await;
+        assert_eq!(2, db.table_names().await.len());
+        db.sync(vec![&b]).await;
+        assert_eq!(1, db.table_names().await.len());
     }
 
     use macros::Table;
+
     #[derive(Table)]
-    #[rizzle(table = "a_table")]
+    #[rizzle(table = "table_a")]
     struct A {
         a: sqlite::Text,
     }
 
     #[derive(Table)]
-    #[rizzle(table = "a_table")]
-    struct A2 {
+    #[rizzle(table = "table_b")]
+    struct B {
         #[rizzle(primary_key)]
+        id: sqlite::Integer,
+    }
+
+    #[derive(Table)]
+    #[rizzle(table = "table_a")]
+    struct A2 {
         a: sqlite::Text,
         #[rizzle(not_null)]
         b: sqlite::Text,
@@ -521,14 +544,12 @@ mod tests {
     #[tokio::test]
     async fn sync_with_added_columns_works() -> Result<(), sqlx::Error> {
         let a = A::new();
-        let tables = vec![a];
         let db = db().await;
-        let _ = db.sync(tables).await?;
+        let _ = sync!(db, a).await?;
         let table_names = db.table_names().await;
         assert_eq!(1, table_names.len());
         let a2 = A2::new();
-        let tables = vec![a2];
-        let _ = db.sync(tables).await?;
+        let _ = sync!(db, a2).await?;
         let table_names = db.table_names().await;
         assert_eq!(1, table_names.len());
         let columns = db.columns().await;
@@ -539,7 +560,7 @@ mod tests {
     #[test]
     fn rizzle_table_name_works() {
         let a = A::new();
-        assert_eq!("create table a_table (a text)", a.create_table_sql())
+        assert_eq!("create table table_a (a text)", a.create_table_sql())
     }
 
     #[derive(Table)]
@@ -554,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn rizzle_indexes_works() {
+    fn indexes_works() {
         let index_table = IndexTable::new();
         assert_eq!(
             "create table index_table (id integer primary key, name text not null)",
@@ -564,5 +585,78 @@ mod tests {
             "create unique index name_index on index_table(name)",
             index_table.create_indexes_sql()
         )
+    }
+
+    #[tokio::test]
+    async fn drop_table_works() -> Result<(), sqlx::Error> {
+        let db = db().await;
+        assert_eq!(0, db.table_names().await.len());
+
+        let a = A::new();
+        let _ = sync!(db, a).await?;
+        assert_eq!(1, db.table_names().await.len());
+
+        let _ = sync!(db).await?;
+        assert_eq!(0, db.table_names().await.len());
+
+        Ok(())
+    }
+
+    #[derive(Table)]
+    #[rizzle(table = "index_table")]
+    struct I {
+        #[rizzle(not_null)]
+        a: sqlite::Text,
+
+        #[rizzle(not_null)]
+        b: sqlite::Text,
+
+        #[rizzle(colummns = "a,b")]
+        a_b_index: sqlite::UniqueIndex,
+    }
+
+    #[tokio::test]
+    async fn create_indexes_works() -> Result<(), sqlx::Error> {
+        let db = db().await;
+        assert_eq!(0, db.index_names().await.len());
+
+        let it = IndexTable::new();
+        let _ = sync!(db, it).await?;
+        assert_eq!(1, db.index_names().await.len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drop_indexes_works() -> Result<(), sqlx::Error> {
+        let db = db().await;
+        assert_eq!(0, db.index_names().await.len());
+
+        let it = IndexTable::new();
+        let _ = sync!(db, it).await?;
+
+        assert_eq!(1, db.index_names().await.len());
+
+        let _ = sync!(db).await?;
+        assert_eq!(0, db.index_names().await.len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drop_columns_works() -> Result<(), sqlx::Error> {
+        let db = db().await;
+        assert_eq!(0, db.columns().await.len());
+
+        let a = A2::new();
+        sync!(db, a).await?;
+
+        assert_eq!(2, db.columns().await.len());
+
+        let a = A::new();
+        let _ = sync!(db, a).await?;
+        assert_eq!(1, db.columns().await.len());
+
+        Ok(())
     }
 }

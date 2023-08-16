@@ -74,10 +74,11 @@ async fn main() {
 
   // order matters here
   // tables are created in the same order they are passed in
-  db.sync!(&users, &posts).await;
+  sync!(db, &users, &posts).await;
 
   let users = db.select().from(&users).where(eq(&users.id, 1)).collect().await;
   let posts = db.select().from(&posts).join(&users).limit(30).collect().await;
-  let users_with_post = db.select().from(&users).with(&posts).collect().await;
+
+  // let users_with_post = db.select().from(&users).with(&posts).collect().await;
 }
 ```
