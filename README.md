@@ -27,7 +27,7 @@ struct Users {
   #[rizzle(columns = "name")]
   name_index: sqlite::UniqueIndex,
 
-  #[rizzle(references = "posts.user_id")]
+  #[rizzle(references = "posts (user_id)")]
   posts: sqlite::Many,
 }
 
@@ -54,7 +54,7 @@ struct Posts {
   #[rizzle(not_null)]
   updated_at: sqlite::Real,
 
-  #[rizzle(references = "users.id")]
+  #[rizzle(references = "users (id)")]
   user_id: sqlite::Integer
 }
 

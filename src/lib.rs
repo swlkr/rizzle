@@ -24,6 +24,7 @@ struct Column {
     not_null: bool,
     primary_key: bool,
     data_type: sqlite::DataType,
+    references: Option<String>,
 }
 
 impl Column {
@@ -41,12 +42,17 @@ impl Column {
             Some(s) => Some(s.as_str()),
             None => None,
         };
+        let references = match &self.references {
+            Some(rf) => Some(format!("references {}", rf)),
+            None => None,
+        };
         vec![
             Some(self.name.as_ref()),
             Some(data_type.as_ref()),
             primary_key,
             not_null,
             default_value,
+            references.as_deref(),
         ]
         .into_iter()
         .filter_map(|s| s)
@@ -99,6 +105,7 @@ impl From<ColumnDef> for Column {
             not_null,
             primary_key,
             default_value,
+            ..Default::default()
         }
     }
 }
@@ -108,11 +115,11 @@ struct Index {
     table_name: String,
     name: String,
     index_type: sqlite::IndexType,
-    column_names: &'static str,
+    column_names: String,
 }
 
 impl Index {
-    fn create_index_sql(&self) -> String {
+    fn create_sql(&self) -> String {
         let unique = match &self.index_type {
             sqlite::IndexType::Plain => " ",
             sqlite::IndexType::Unique => " unique ",
@@ -124,6 +131,20 @@ impl Index {
     }
 }
 
+#[derive(FromRow, Default)]
+struct Reference {
+    clause: String,
+    id: i64,
+    seq: i64,
+    many: bool,
+    table: String,
+    from: String,
+    to: String,
+    on_update: String,
+    on_delete: String,
+    r#match: String,
+}
+
 trait Table {
     fn new() -> Self
     where
@@ -131,9 +152,8 @@ trait Table {
     fn name(&self) -> String;
     fn columns(&self) -> Vec<Column>;
     fn indexes(&self) -> Vec<Index>;
-    fn create_table_sql(&self) -> String;
-    fn drop_table_sql(&self) -> String;
-    fn create_indexes_sql(&self) -> String;
+    fn references(&self) -> Vec<Reference>;
+    fn create_sql(&self) -> String;
 }
 
 pub mod sqlite {
@@ -143,6 +163,7 @@ pub mod sqlite {
     pub type Real = &'static str;
     pub type Index = &'static str;
     pub type UniqueIndex = &'static str;
+    pub type Many = &'static str;
 
     #[derive(Default, PartialEq, Debug)]
     pub enum DataType {
@@ -170,96 +191,6 @@ pub mod sqlite {
         #[default]
         Plain,
         Unique,
-    }
-}
-
-// #[derive(Table)]
-struct Users {
-    // #[rizzle(primary_key)]
-    id: sqlite::Integer,
-    // #[column(not_null)]
-    name: sqlite::Text,
-    // #[column(not_null)]
-    created_at: sqlite::Real,
-    // #[column(not_null)]
-    updated_at: sqlite::Real,
-    // #[index(name)]
-    name_idx: sqlite::UniqueIndex,
-}
-
-impl Table for Users {
-    fn new() -> Self {
-        Self {
-            id: "id",
-            name: "name",
-            created_at: "created_at",
-            updated_at: "updated_at",
-            name_idx: "name_idx",
-        }
-    }
-
-    fn name(&self) -> String {
-        "users".to_string()
-    }
-
-    fn columns(&self) -> Vec<Column> {
-        vec![
-            Column {
-                name: "id".to_string(),
-                primary_key: true,
-                data_type: sqlite::DataType::Integer,
-                table_name: self.name(),
-                ..Default::default()
-            },
-            Column {
-                name: "name".to_string(),
-                not_null: true,
-                data_type: sqlite::DataType::Text,
-                table_name: self.name(),
-                ..Default::default()
-            },
-            Column {
-                name: "created_at".to_string(),
-                data_type: sqlite::DataType::Real,
-                not_null: true,
-                table_name: self.name(),
-                ..Default::default()
-            },
-            Column {
-                name: "updated_at".to_string(),
-                data_type: sqlite::DataType::Real,
-                not_null: true,
-                table_name: self.name(),
-                ..Default::default()
-            },
-        ]
-    }
-
-    fn indexes(&self) -> Vec<Index> {
-        vec![Index {
-            table_name: "users".to_string(),
-            name: "name_idx".to_string(),
-            index_type: sqlite::IndexType::Unique,
-            column_names: "name",
-        }]
-    }
-
-    fn create_table_sql(&self) -> String {
-        let columns_sql = self
-            .columns()
-            .iter()
-            .map(|c| c.definition_sql())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("create table {} ({});", self.name(), columns_sql)
-    }
-
-    fn drop_table_sql(&self) -> String {
-        todo!()
-    }
-
-    fn create_indexes_sql(&self) -> String {
-        todo!()
     }
 }
 
@@ -326,6 +257,10 @@ impl Database {
             .into_iter()
             .map(|cd| cd.into())
             .collect::<Vec<_>>()
+    }
+
+    async fn references(&self) -> Vec<Reference> {
+        vec![]
     }
 
     async fn execute(&self, sql: &str) -> Result<(), sqlx::Error> {
@@ -422,7 +357,7 @@ fn create_indexes_sql(tables: &Vec<&dyn Table>, index_names: Vec<String>) -> Str
         .iter()
         .flat_map(|t| t.indexes())
         .filter(|i| !index_names.contains(&i.name))
-        .map(|i| i.create_index_sql())
+        .map(|i| i.create_sql())
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -432,7 +367,7 @@ fn create_tables_sql(table_names: &Vec<TableName>, tables: &Vec<&dyn Table>) -> 
     tables
         .iter()
         .filter(|t| !table_names.contains(&&t.name()))
-        .map(|table| table.create_table_sql())
+        .map(|table| table.create_sql())
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -479,9 +414,9 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
 }
 #[cfg(test)]
 mod tests {
-    use crate::sqlite::Text;
-
     use super::*;
+    use crate::sqlite::Text;
+    use macros::Table;
 
     async fn db() -> Database {
         Database::new("sqlite://:memory:".to_string()).await
@@ -517,8 +452,6 @@ mod tests {
         db.sync(vec![&b]).await;
         assert_eq!(1, db.table_names().await.len());
     }
-
-    use macros::Table;
 
     #[derive(Table)]
     #[rizzle(table = "table_a")]
@@ -560,7 +493,7 @@ mod tests {
     #[test]
     fn rizzle_table_name_works() {
         let a = A::new();
-        assert_eq!("create table table_a (a text)", a.create_table_sql())
+        assert_eq!("create table table_a (a text)", a.create_sql())
     }
 
     #[derive(Table)]
@@ -572,19 +505,6 @@ mod tests {
         name: sqlite::Text,
         #[rizzle(columns = "name")]
         name_index: sqlite::UniqueIndex,
-    }
-
-    #[test]
-    fn indexes_works() {
-        let index_table = IndexTable::new();
-        assert_eq!(
-            "create table index_table (id integer primary key, name text not null)",
-            index_table.create_table_sql()
-        );
-        assert_eq!(
-            "create unique index name_index on index_table(name)",
-            index_table.create_indexes_sql()
-        )
     }
 
     #[tokio::test]
@@ -611,7 +531,7 @@ mod tests {
         #[rizzle(not_null)]
         b: sqlite::Text,
 
-        #[rizzle(colummns = "a,b")]
+        #[rizzle(columns = "a,b")]
         a_b_index: sqlite::UniqueIndex,
     }
 
@@ -622,7 +542,14 @@ mod tests {
 
         let it = IndexTable::new();
         let _ = sync!(db, it).await?;
-        assert_eq!(1, db.index_names().await.len());
+        assert_eq!(
+            vec!["name_index".to_owned()],
+            db.index_names()
+                .await
+                .into_iter()
+                .map(|ind| ind.0)
+                .collect::<Vec<_>>()
+        );
 
         Ok(())
     }
@@ -658,5 +585,54 @@ mod tests {
         assert_eq!(1, db.columns().await.len());
 
         Ok(())
+    }
+
+    #[derive(Table)]
+    #[rizzle(table = "users")]
+    struct Users {
+        #[rizzle(primary_key)]
+        id: sqlite::Integer,
+
+        #[rizzle(not_null)]
+        name: sqlite::Text,
+
+        #[rizzle(not_null)]
+        created_at: sqlite::Real,
+
+        #[rizzle(not_null)]
+        updated_at: sqlite::Real,
+
+        #[rizzle(columns = "name")]
+        name_index: sqlite::UniqueIndex,
+
+        #[rizzle(references = "posts(user_id)")]
+        posts: sqlite::Many,
+    }
+
+    #[derive(Table)]
+    #[rizzle(table = "posts")]
+    struct Posts {
+        #[rizzle(primary_key)]
+        id: sqlite::Integer,
+
+        #[rizzle(not_null)]
+        body: sqlite::Text,
+
+        #[rizzle(not_null)]
+        created_at: sqlite::Real,
+
+        #[rizzle(not_null)]
+        updated_at: sqlite::Real,
+
+        #[rizzle(not_null, references = "users(id)")]
+        user_id: sqlite::Integer,
+    }
+
+    #[test]
+    fn create_table_sql_works() {
+        let users = Users::new();
+        let posts = Posts::new();
+        assert_eq!("create table users (id integer primary key, name text not null, created_at real not null, updated_at real not null)", users.create_sql());
+        assert_eq!("create table posts (id integer primary key, body text not null, created_at real not null, updated_at real not null, user_id integer not null references users(id))", posts.create_sql())
     }
 }

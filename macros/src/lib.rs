@@ -1,12 +1,13 @@
-use proc_macro::{Span, TokenStream};
-use proc_macro2::Span as Span2;
+use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
+use syn::Expr;
+use syn::ExprAssign;
+use syn::ExprLit;
+use syn::ExprPath;
 use syn::Field;
-use syn::{
-    parse::Parse, parse_macro_input, DeriveInput, Fields, Ident, LitStr, PathSegment, Result,
-    Token, TypePath,
-};
+use syn::Lit;
+use syn::{parse::Parse, parse_macro_input, DeriveInput, LitStr, PathSegment, Result, TypePath};
 
 #[proc_macro_derive(Table, attributes(rizzle))]
 pub fn table(s: TokenStream) -> TokenStream {
@@ -24,40 +25,69 @@ struct RizzleAttr {
     not_null: bool,
     default_value: Option<LitStr>,
     columns: Option<LitStr>,
+    references: Option<LitStr>,
 }
 
 impl Parse for RizzleAttr {
     fn parse(input: syn::parse::ParseStream) -> Result<Self> {
         let mut rizzle_attr = RizzleAttr::default();
-        while !input.is_empty() {
-            let next = input.parse::<Ident>()?.to_string();
-            match next.as_str() {
-                "table" => {
-                    let _ = input.parse::<Token![=]>()?;
-                    let table_name: LitStr = input.parse()?;
-                    rizzle_attr.table_name = Some(table_name);
-                }
-                "primary_key" => {
-                    rizzle_attr.primary_key = true;
-                }
-                "not_null" => {
-                    rizzle_attr.not_null = true;
-                }
-                "default" => {
-                    let _ = input.parse::<Token![=]>()?;
-                    let default_value: LitStr = input.parse()?;
-                    rizzle_attr.default_value = Some(default_value);
-                }
-                "columns" => {
-                    let _ = input.parse::<Token![=]>()?;
-                    let columns: LitStr = input.parse()?;
-                    rizzle_attr.columns = Some(columns);
-                }
-                _ => {}
+        let args_parsed =
+            syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated(input)?;
+        for expr in args_parsed.iter() {
+            match expr {
+                Expr::Assign(ExprAssign { left, right, .. }) => match (&**left, &**right) {
+                    (Expr::Path(ExprPath { path, .. }), Expr::Lit(ExprLit { lit, .. })) => {
+                        if let (Some(PathSegment { ident, .. }), Lit::Str(lit_str)) =
+                            (path.segments.last(), lit)
+                        {
+                            match ident.to_string().as_ref() {
+                                "table" => {
+                                    rizzle_attr.table_name = Some(lit_str.clone());
+                                }
+                                "default" => {
+                                    rizzle_attr.default_value = Some(lit_str.clone());
+                                }
+                                "columns" => {
+                                    rizzle_attr.columns = Some(lit_str.clone());
+                                }
+                                "references" => {
+                                    rizzle_attr.references = Some(lit_str.clone());
+                                }
+                                _ => unimplemented!(),
+                            }
+                        }
+                    }
+                    _ => unimplemented!(),
+                },
+                Expr::Path(path) => match path.path.segments.len() {
+                    1 => match path
+                        .path
+                        .segments
+                        .first()
+                        .unwrap()
+                        .ident
+                        .to_string()
+                        .as_ref()
+                    {
+                        "not_null" => rizzle_attr.not_null = true,
+                        "primary_key" => rizzle_attr.primary_key = true,
+                        _ => unimplemented!(),
+                    },
+                    _ => unimplemented!(),
+                },
+                _ => unimplemented!(),
             }
         }
+
         Ok(rizzle_attr)
     }
+}
+
+struct RizzleField {
+    ident: String,
+    field: Field,
+    attrs: Vec<RizzleAttr>,
+    type_string: String,
 }
 
 fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
@@ -65,20 +95,40 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .attrs
         .iter()
         .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
-        .filter(|attr| attr.table_name.is_some())
         .last()
         .expect("define #![rizzle(table_name = \"your table name here\")] on struct")
         .table_name
         .unwrap();
     let struct_name = input.ident;
     let table_name = table_str.value();
-    let fields = match input.data {
-        syn::Data::Struct(ref data) => &data.fields,
+    let rizzle_fields = match input.data {
+        syn::Data::Struct(ref data) => data
+            .fields
+            .iter()
+            .map(|field| {
+                let ident = field
+                    .ident
+                    .as_ref()
+                    .expect("Struct fields should have names")
+                    .to_string();
+                RizzleField {
+                    ident: ident.to_owned(),
+                    field: field.clone(),
+                    attrs: field
+                        .attrs
+                        .iter()
+                        .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
+                        .collect::<Vec<_>>(),
+                    type_string: string_type_from_field(&field),
+                }
+            })
+            .collect::<Vec<_>>(),
         _ => unimplemented!(),
     };
-    let columns = columns(&table_name, &fields);
-    let attrs = attrs(&fields);
-    let indexes = indexes(&table_name, &fields);
+    let columns = columns(&table_name, &rizzle_fields);
+    let attrs = struct_attrs(&rizzle_fields);
+    let indexes = indexes(&table_name, &rizzle_fields);
+    let references = references(&table_name, &rizzle_fields);
 
     Ok(quote! {
         impl Table for #struct_name {
@@ -98,7 +148,11 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                 vec![#(#indexes,)*]
             }
 
-            fn create_table_sql(&self) -> String {
+            fn references(&self) -> Vec<Reference> {
+                vec![#(#references,)*]
+            }
+
+            fn create_sql(&self) -> String {
                 let columns_sql = self.columns()
                     .iter()
                     .map(|c| c.definition_sql())
@@ -106,27 +160,52 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                     .join(", ");
                 format!("create table {} ({})", self.name(), columns_sql)
             }
-
-            fn drop_table_sql(&self) -> String {
-                format!("drop table {}", self.name())
-            }
-
-            fn create_indexes_sql(&self) -> String {
-                self.indexes()
-                    .iter()
-                    .map(|i| i.create_index_sql())
-                    .collect::<Vec<_>>()
-                    .join(";")
-            }
         }
     })
 }
 
-fn attrs(fields: &Fields) -> Vec<TokenStream2> {
+fn references(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
     fields
         .iter()
+        .filter(|field| match field.type_string.as_str() {
+            "Real" | "Integer" | "Text" | "Blob" | "Many" => true,
+            _ => false,
+        })
+        .filter(|field| match field.attrs.last() {
+            Some(attr) => attr.references.is_some(),
+            None => false,
+        })
         .map(|field| {
-            let ident = &field
+            let RizzleAttr { references, .. } = field.attrs.last().unwrap();
+            let many = field.type_string == "Many";
+            quote! {
+                Reference {
+                    table: #table_name.to_owned(),
+                    clause: #references.to_owned(),
+                    many: #many,
+                    ..Default::default()
+                }
+            }
+        })
+        .collect()
+}
+
+fn string_type_from_field(field: &Field) -> String {
+    match &field.ty {
+        syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
+            Some(PathSegment { ident, .. }) => ident.to_string(),
+            None => unimplemented!(),
+        },
+        _ => unimplemented!(),
+    }
+}
+
+fn struct_attrs(fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
+    fields
+        .iter()
+        .map(|f| {
+            let ident = &f
+                .field
                 .ident
                 .as_ref()
                 .expect("Struct fields should have names");
@@ -138,117 +217,96 @@ fn attrs(fields: &Fields) -> Vec<TokenStream2> {
         .collect::<Vec<_>>()
 }
 
-fn data_type_from_field(field: &Field) -> TokenStream2 {
-    match &field.ty {
-        syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
-            Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
-                "Real" => quote! { sqlite::DataType::Real },
-                "Integer" => quote! { sqlite::DataType::Integer },
-                "Text" => quote! { sqlite::DataType::Text },
-                _ => quote! { sqlite::DataType::Blob },
-            },
-            None => todo!(),
-        },
-        _ => todo!(),
+fn data_type(string_type: &String) -> TokenStream2 {
+    match string_type.as_str() {
+        "Real" => quote! { sqlite::DataType::Real },
+        "Integer" => quote! { sqlite::DataType::Integer },
+        "Text" => quote! { sqlite::DataType::Text },
+        _ => quote! { sqlite::DataType::Blob },
     }
 }
 
-fn columns(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
+fn columns(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
     fields
         .iter()
-        .filter(|field| match &field.ty {
-            syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
-                Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
-                    "Real" | "Integer" | "Text" | "Blob" => true,
-                    _ => false,
-                },
-                None => false,
-            },
+        .filter(|field| match field.type_string.as_ref() {
+            "Real" | "Integer" | "Text" | "Blob" => true,
             _ => false,
         })
         .map(|field| {
-            let attr = field
-                .attrs
-                .iter()
-                .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
-                .last()
-                .unwrap_or_default();
-            let ident = &field
-                .ident
-                .as_ref()
-                .expect("Struct fields should have names")
-                .to_string();
-            let RizzleAttr {
+            let ty = data_type(&field.type_string);
+            let ident = &field.ident;
+            if let Some(RizzleAttr {
                 primary_key,
                 not_null,
                 default_value,
+                references,
                 ..
-            } = attr;
-            let default_value = match default_value {
-                Some(default) => quote! { Some(#default) },
-                None => quote! { None },
-            };
-            let ty = data_type_from_field(&field);
-            quote! {
-                Column {
-                    table_name: #table_name.to_string(),
-                    name: #ident.to_string(),
-                    data_type: #ty,
-                    primary_key: #primary_key,
-                    not_null: #not_null,
-                    default_value: #default_value
+            }) = field.attrs.last()
+            {
+                let default_value = match default_value {
+                    Some(default) => quote! { Some(#default) },
+                    None => quote! { None },
+                };
+                let references = match references {
+                    Some(references) => quote! { Some(#references.to_owned()) },
+                    None => quote! { None },
+                };
+                quote! {
+                    Column {
+                        table_name: #table_name.to_string(),
+                        name: #ident.to_string(),
+                        data_type: #ty,
+                        primary_key: #primary_key,
+                        not_null: #not_null,
+                        default_value: #default_value,
+                        references: #references,
+                        ..Default::default()
+                    }
+                }
+            } else {
+                quote! {
+                    Column {
+                        table_name: #table_name.to_string(),
+                        name: #ident.to_string(),
+                        data_type: #ty,
+                        ..Default::default()
+                    }
                 }
             }
         })
         .collect::<Vec<_>>()
 }
 
-fn indexes(table_name: &String, fields: &Fields) -> Vec<TokenStream2> {
+fn indexes(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
     fields
         .iter()
-        .filter(|field| match &field.ty {
-            syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
-                Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
-                    "Index" | "UniqueIndex" => true,
-                    _ => false,
-                },
-                None => false,
-            },
+        .filter(|f| match f.type_string.as_ref() {
+            "Index" | "UniqueIndex" => true,
             _ => false,
         })
-        .map(|field| {
-            let attr = field
-                .attrs
-                .iter()
-                .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
-                .last()
-                .unwrap_or_default();
-            let ident = &field
-                .ident
-                .as_ref()
-                .expect("Struct fields should have names")
-                .to_string();
-            let ty = match &field.ty {
-                syn::Type::Path(TypePath { path, .. }) => match path.segments.last() {
-                    Some(PathSegment { ident, .. }) => match ident.to_string().as_str() {
-                        "Index" => quote! { sqlite::IndexType::Plain },
-                        "UniqueIndex" => quote! { sqlite::IndexType::Unique },
-                        _ => unimplemented!(),
-                    },
-                    None => unimplemented!(),
-                },
+        .filter(|f| match f.attrs.last() {
+            Some(attr) => attr.columns.is_some(),
+            None => false,
+        })
+        .map(|f| {
+            let ty = match f.type_string.as_ref() {
+                "Index" => quote! { sqlite::IndexType::Plain },
+                "UniqueIndex" => quote! { sqlite::IndexType::Unique },
                 _ => unimplemented!(),
             };
-            let column_names = match attr.columns {
-                Some(lit) => lit,
-                None => LitStr::new("", Span2::call_site()),
+            let name = &f.ident;
+            let RizzleAttr { columns, .. } = f.attrs.last().unwrap();
+            let column_names = match columns {
+                Some(lit_str) => quote! { #lit_str.to_string() },
+                None => quote! { "".to_string() },
             };
             quote! {
                 Index {
                     table_name: #table_name.to_string(),
-                    name: #ident.to_string(),
+                    name: #name.to_string(),
                     index_type: #ty,
-                    column_names: #column_names,
+                    column_names: #column_names
                 }
             }
         })
