@@ -7,7 +7,7 @@ rizzle is a database automatic migration generator and query builder in one for 
 # Quickstart
 
 ```rust
-use rizzle::{Database, Table, sqlite};
+use rizzle::{Database, Table, sqlite, eq};
 
 #[derive(Table)]
 #[rizzle(table = "users")]
@@ -23,6 +23,9 @@ struct Users {
 
   #[rizzle(not_null)]
   updated_at: sqlite::Real,
+
+  #[rizzle(columns = "name")]
+  name_index: sqlite::UniqueIndex,
 
   #[rizzle(references = "posts.user_id")]
   posts: sqlite::Many,
@@ -71,29 +74,10 @@ async fn main() {
 
   // order matters here
   // tables are created in the same order they are passed in
-  db.sync!(&users, &posts);
+  db.sync!(&users, &posts).await;
 
-  let users: User = db.select()
-                      .from(&users)
-                      .where(eq(&users.id, 1))
-                      .limit(1)
-                      .collect()
-                      .first()
-                      .expect("user expected with id 1");
-
-  let posts_with_users: Vec<Post> = db.select()
-                                      .from(&posts)
-                                      .join(&users)
-                                      .limit(30)
-                                      .collect();
-
-  let users_with_posts: Vec<User> = db.select()
-                                      .from(&users)
-                                      .with(&posts)
-                                      .where(eq(&users.id, 1))
-                                      .limit(1)
-                                      .collect()
-                                      .first()
-                                      .expect("user expected with id 1");
+  let users = db.select().from(&users).where(eq(&users.id, 1)).collect().await;
+  let posts = db.select().from(&posts).join(&users).limit(30).collect().await;
+  let users_with_post = db.select().from(&users).with(&posts).collect().await;
 }
 ```
