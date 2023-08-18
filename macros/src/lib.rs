@@ -96,7 +96,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         .iter()
         .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
         .last()
-        .expect("define #![rizzle(table_name = \"your table name here\")] on struct")
+        .expect("define #![rizzle(table = \"your table name here\")] on struct")
         .table_name
         .unwrap();
     let struct_name = input.ident;
@@ -126,7 +126,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
         _ => unimplemented!(),
     };
     let columns = columns(&table_name, &rizzle_fields);
-    let attrs = struct_attrs(&rizzle_fields);
+    let attrs = struct_attrs(&table_name, &rizzle_fields);
     let indexes = indexes(&table_name, &rizzle_fields);
     let references = references(&table_name, &rizzle_fields);
 
@@ -200,7 +200,7 @@ fn string_type_from_field(field: &Field) -> String {
     }
 }
 
-fn struct_attrs(fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
+fn struct_attrs(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
     fields
         .iter()
         .map(|f| {
@@ -209,7 +209,7 @@ fn struct_attrs(fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
                 .ident
                 .as_ref()
                 .expect("Struct fields should have names");
-            let value = ident.to_string();
+            let value = format!("{}.{}", table_name, ident.to_string());
             quote! {
                 #ident: #value
             }
@@ -311,4 +311,123 @@ fn indexes(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> 
             }
         })
         .collect::<Vec<_>>()
+}
+
+#[proc_macro_derive(Select, attributes(rizzle))]
+pub fn select(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match select_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn select_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
+    let fields = match input.data {
+        syn::Data::Struct(ref data) => data
+            .fields
+            .iter()
+            .map(|field| {
+                let ident = field
+                    .ident
+                    .as_ref()
+                    .expect("Struct fields should have names");
+                let ty = &field.ty;
+                (ident, ty)
+            })
+            .collect::<Vec<_>>(),
+        _ => unimplemented!(),
+    };
+    let attrs = &fields
+        .iter()
+        .map(|(ident, ty)| {
+            quote! {
+                #ident: #ty::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let column_names = fields
+        .iter()
+        .map(|(ident, _)| ident.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(quote! {
+        impl Select for #struct_name {
+            fn new() -> Self {
+                Self { #(#attrs,)* }
+            }
+            fn sql(&self) -> String {
+                format!("select {}", #column_names)
+            }
+        }
+    })
+}
+
+#[proc_macro_derive(Insert, attributes(rizzle))]
+pub fn insert(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match insert_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn insert_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
+    let fields = match input.data {
+        syn::Data::Struct(ref data) => data
+            .fields
+            .iter()
+            .map(|field| {
+                let ident = field
+                    .ident
+                    .as_ref()
+                    .expect("Struct fields should have names");
+                let ty = &field.ty;
+                (ident, ty)
+            })
+            .collect::<Vec<_>>(),
+        _ => unimplemented!(),
+    };
+    let attrs = &fields
+        .iter()
+        .map(|(ident, ty)| {
+            quote! {
+                #ident: #ty::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let column_names = fields
+        .iter()
+        .map(|(ident, _)| ident.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql_placeholders = &fields.iter().map(|_| "?").collect::<Vec<_>>();
+    let placeholders = &fields.iter().map(|_| "{}").collect::<Vec<_>>().join(", ");
+    let data_values = &fields
+        .iter()
+        .map(|(ident, _)| quote! { self.#ident.clone().into() })
+        .collect::<Vec<_>>();
+    Ok(quote! {
+        impl Insert for #struct_name {
+            fn new() -> Self {
+                Self { #(#attrs,)* }
+            }
+
+            fn values(&self) -> Vec<DataValue> {
+                vec![
+                    #(#data_values,)*
+                ]
+            }
+
+            fn values_sql(&self) -> String {
+                format!(#placeholders, #(#sql_placeholders,)*)
+            }
+
+            fn insert_clause_sql(&self) -> String {
+                format!("({}) values ({})", #column_names, self.values_sql())
+            }
+        }
+    })
 }

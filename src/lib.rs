@@ -1,10 +1,7 @@
 #![allow(unused)]
-use sqlx::{
-    query_as,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    Executor, FromRow, SqlitePool,
-};
-use std::{collections::HashSet, time::Duration};
+use sqlite::DataValue;
+use sqlx::{query_as, Arguments, Encode, Executor, FromRow, IntoArguments};
+use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
 
 #[derive(FromRow)]
 struct ColumnDef {
@@ -17,7 +14,7 @@ struct ColumnDef {
 }
 
 #[derive(Default, PartialEq, Debug)]
-struct Column {
+pub struct Column {
     table_name: String,
     default_value: Option<String>,
     name: String,
@@ -111,7 +108,7 @@ impl From<ColumnDef> for Column {
 }
 
 #[derive(Default)]
-struct Index {
+pub struct Index {
     table_name: String,
     name: String,
     index_type: sqlite::IndexType,
@@ -132,7 +129,7 @@ impl Index {
 }
 
 #[derive(FromRow, Default)]
-struct Reference {
+pub struct Reference {
     clause: String,
     id: i64,
     seq: i64,
@@ -145,7 +142,7 @@ struct Reference {
     r#match: String,
 }
 
-trait Table {
+pub trait Table {
     fn new() -> Self
     where
         Self: Sized;
@@ -157,6 +154,16 @@ trait Table {
 }
 
 pub mod sqlite {
+    use super::*;
+    pub use sqlx::sqlite::SqliteConnectOptions as ConnectOptions;
+    pub use sqlx::sqlite::SqliteJournalMode as JournalMode;
+    pub use sqlx::sqlite::SqlitePoolOptions as PoolOptions;
+    pub use sqlx::sqlite::SqliteQueryResult as QueryResult;
+    pub use sqlx::sqlite::SqliteSynchronous as Synchronous;
+    pub use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
+    pub use sqlx::Sqlite as Driver;
+    pub use sqlx::SqlitePool as Pool;
+    pub use sqlx::{QueryBuilder, Row, Type};
     pub type Integer = &'static str;
     pub type Text = &'static str;
     pub type Blob = &'static str;
@@ -172,6 +179,38 @@ pub mod sqlite {
         Integer,
         Real,
         Text,
+    }
+
+    #[derive(Debug)]
+    pub enum DataValue {
+        Blob(Vec<u8>),
+        Integer(i64),
+        Real(f64),
+        Text(String),
+    }
+
+    impl From<i64> for DataValue {
+        fn from(value: i64) -> Self {
+            Self::Integer(value)
+        }
+    }
+
+    impl From<String> for DataValue {
+        fn from(value: String) -> Self {
+            Self::Text(value)
+        }
+    }
+
+    impl From<f64> for DataValue {
+        fn from(value: f64) -> Self {
+            Self::Real(value)
+        }
+    }
+
+    impl From<Vec<u8>> for DataValue {
+        fn from(value: Vec<u8>) -> Self {
+            Self::Blob(value)
+        }
     }
 
     impl std::fmt::Display for DataType {
@@ -192,131 +231,492 @@ pub mod sqlite {
         Plain,
         Unique,
     }
+
+    #[derive(Clone, Default, Debug)]
+    pub struct DatabaseOptions {
+        connection_string: String,
+        max_connection: u32,
+        create_if_missing: bool,
+        journal_mode: JournalMode,
+        synchronous: Synchronous,
+        busy_timeout: Duration,
+    }
+
+    impl DatabaseOptions {
+        pub fn new(filename: &str) -> Self {
+            Self {
+                connection_string: filename.to_owned(),
+                max_connection: 10,
+                create_if_missing: true,
+                journal_mode: JournalMode::Wal,
+                synchronous: Synchronous::Normal,
+                busy_timeout: Duration::from_secs(30),
+            }
+        }
+
+        pub fn max_connections(mut self, max: u32) -> Self {
+            self.max_connection = max;
+            self
+        }
+
+        pub fn create_if_missing(mut self, create: bool) -> Self {
+            self.create_if_missing = create;
+            self
+        }
+
+        pub fn journal_mode(mut self, mode: JournalMode) -> Self {
+            self.journal_mode = mode;
+            self
+        }
+
+        pub fn synchronous(mut self, synchronous: Synchronous) -> Self {
+            self.synchronous = synchronous;
+            self
+        }
+
+        pub fn busy_timeout(mut self, duration: Duration) -> Self {
+            self.busy_timeout = duration;
+            self
+        }
+
+        pub fn pool_options(&self) -> PoolOptions {
+            PoolOptions::new().max_connections(self.max_connection)
+        }
+
+        pub fn connect_options(&self) -> ConnectOptions {
+            let options: ConnectOptions = self.connection_string.parse().unwrap();
+            options
+                .create_if_missing(self.create_if_missing)
+                .journal_mode(self.journal_mode)
+                .synchronous(self.synchronous)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Database {
+        pool: Pool,
+    }
+
+    impl Database {
+        pub async fn new(options: DatabaseOptions) -> Result<Self, RizzleError> {
+            match Self::pool(options).await {
+                Ok(pool) => Ok(Self { pool }),
+                Err(err) => Err(err),
+            }
+        }
+
+        pub async fn connect(filename: &str) -> Result<Self, RizzleError> {
+            let options = DatabaseOptions::new(filename);
+            match Self::pool(options).await {
+                Ok(pool) => Ok(Self { pool }),
+                Err(err) => Err(err),
+            }
+        }
+
+        async fn pool(options: DatabaseOptions) -> Result<Pool, RizzleError> {
+            let maybe_pool = options
+                .pool_options()
+                .connect_with(options.connect_options())
+                .await;
+            match maybe_pool {
+                Ok(p) => Ok(p),
+                Err(e) => {
+                    return Err(RizzleError::PoolClosed);
+                }
+            }
+        }
+
+        pub async fn table_names(&self) -> Vec<TableName> {
+            let sql = "select name from sqlite_schema where type = 'table'";
+            match query_as(sql).fetch_all(&self.pool).await {
+                Ok(table_names) => table_names,
+                Err(_) => vec![],
+            }
+        }
+
+        pub async fn index_names(&self) -> Vec<IndexName> {
+            let sql = "select name from sqlite_schema where type = 'index'";
+            match query_as(sql).fetch_all(&self.pool).await {
+                Ok(names) => names,
+                Err(_) => vec![],
+            }
+        }
+
+        pub async fn columns(&self) -> Vec<Column> {
+            let sql = "select s.name as table_name, pti.name as name, pti.type as data_type, pti.pk as primary_key, pti.dflt_value as default_value, pti.[notnull] as not_null from sqlite_schema s left outer join pragma_table_info((s.name)) pti on pti.name <> s.name where s.type = 'table'";
+            let column_defs: Vec<ColumnDef> =
+                sqlx::query_as(sql).fetch_all(&self.pool).await.unwrap();
+            column_defs
+                .into_iter()
+                .map(|cd| cd.into())
+                .collect::<Vec<_>>()
+        }
+
+        async fn references(&self) -> Vec<Reference> {
+            vec![]
+        }
+
+        pub async fn schema_sql(&self) -> String {
+            sqlx::query("select * from sqlite_schema")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<String, usize>(0))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        async fn execute(&self, sql: &str) -> Result<(), sqlx::Error> {
+            let _ = &self.pool.execute(sql).await?;
+            Ok(())
+        }
+
+        /// sync given a vector of impl Table will migrate the database to a new state
+        pub async fn sync(&self, tables: Vec<&dyn Table>) -> Result<(), sqlx::Error> {
+            // 6 parts:
+            // create tables
+            // drop tables
+            // add columns
+            // drop columns
+            // create indexes
+            // drop indexes
+
+            let table_names = self.table_names().await;
+            let create_tables_sql = create_tables_sql(&table_names, &tables);
+            let _ = self.execute(&create_tables_sql).await?;
+
+            let table_names = self.table_names().await;
+            let drop_tables_sql = drop_tables_sql(&table_names, &tables);
+            let _ = self.execute(&drop_tables_sql).await?;
+
+            let db_columns = self.columns().await;
+            let new_columns: Vec<_> = tables.iter().flat_map(|t| t.columns()).collect();
+            let columns_to_add = columns_to_add(db_columns, new_columns);
+            let add_columns_sql = add_columns_sql(columns_to_add);
+            let _ = self.execute(&add_columns_sql).await?;
+
+            let db_columns = self.columns().await;
+            let new_columns: Vec<_> = tables.iter().flat_map(|t| t.columns()).collect();
+            let drop_columns_sql = drop_columns_sql(db_columns, new_columns);
+            let _ = self.execute(&drop_columns_sql).await?;
+
+            let index_names = self
+                .index_names()
+                .await
+                .into_iter()
+                .map(|idx| idx.0)
+                .collect::<Vec<_>>();
+            let create_indexes_sql = create_indexes_sql(&tables, index_names);
+            let _ = self.execute(&create_indexes_sql).await?;
+
+            let index_names = self
+                .index_names()
+                .await
+                .into_iter()
+                .map(|idx| idx.0)
+                .collect::<Vec<_>>();
+            let drop_indexes_sql = drop_indexes_sql(tables, index_names);
+            let _ = self.execute(&drop_indexes_sql);
+
+            Ok(())
+        }
+
+        pub fn select(&self) -> Query {
+            Query::new(self.pool.clone()).select()
+        }
+
+        pub fn select_with(&self, select: impl Select) -> Query {
+            Query::new(self.pool.clone()).select_with(select)
+        }
+
+        pub fn insert(&self, insert: impl Table) -> Query {
+            Query::new(self.pool.clone()).insert(insert.name())
+        }
+    }
+
+    pub struct Bind1 {
+        sql: String,
+        value: DataValue,
+    }
+
+    pub struct Bind<T>
+    where
+        T: for<'a> Encode<'a, Driver> + Send + Type<Driver>,
+    {
+        sql: String,
+        value: Box<T>,
+    }
+
+    impl<T> Bind<T>
+    where
+        T: for<'a> Encode<'a, Driver> + Send + Type<Driver>,
+    {
+        pub fn new(sql: String, value: Box<T>) -> Self {
+            Self { sql, value }
+        }
+    }
+
+    pub struct Query {
+        pool: Pool,
+        sql: String,
+        values: Vec<DataValue>,
+    }
+
+    impl Query {
+        fn new(pool: Pool) -> Self {
+            Self {
+                pool,
+                sql: String::new(),
+                values: vec![],
+            }
+        }
+
+        fn push(&mut self, sql: impl Display) {
+            self.sql.push_str(&format!("{} ", sql));
+        }
+
+        fn push_bind(&mut self, bind: Bind1) {
+            self.sql.push_str(&format!("{} ", bind.sql));
+            self.values.push(bind.value);
+        }
+
+        pub fn select(mut self) -> Self {
+            self.push("select *");
+            self
+        }
+
+        pub fn select_with(mut self, sel: impl Select) -> Self {
+            self.push(sel.sql());
+            self
+        }
+
+        pub fn from(mut self, table: impl Table) -> Self {
+            let sql = format!("from {}", table.name());
+            self.push(sql);
+            self
+        }
+
+        pub fn r#where(mut self, bind: Bind1) -> Self {
+            self.push("where");
+            self.push_bind(bind);
+            self
+        }
+
+        pub fn inner_join(mut self, table: impl Table, sql: String) -> Self {
+            self.push(format!("inner join {} on {}", table.name(), sql));
+            self
+        }
+
+        pub fn left_join(mut self, table: impl Table, sql: String) -> Self {
+            self.push(format!("left join {} on {}", table.name(), sql));
+            self
+        }
+
+        pub fn right_join(mut self, table: impl Table, sql: String) -> Self {
+            self.push(format!("right join {} on {}", table.name(), sql));
+            self
+        }
+
+        pub fn full_join(mut self, table: impl Table, sql: String) -> Self {
+            self.push(format!("full join {} on {}", table.name(), sql));
+            self
+        }
+
+        pub fn limit(mut self, num: u64) -> Self {
+            self.push(format!("limit {}", num));
+            self
+        }
+
+        pub fn offset(mut self, num: u64) -> Self {
+            self.push(format!("offset {}", num));
+            self
+        }
+
+        pub fn order_by(mut self, sql: String) -> Self {
+            self.push(format!("order by {}", sql));
+            self
+        }
+
+        pub fn sql(&self) -> String {
+            self.sql.as_str().trim_end().to_owned()
+        }
+
+        // pub async fn all<'X>(&'all self) -> Result<Vec<X>, sqlx::Error>
+        // where
+        //     X: for<'x> FromRow<'x, SqliteRow> + Send + Unpin,
+        // {
+        //     let mut builder = QueryBuilder::new(&self.sql);
+        //     for value in &self.values {
+        //         match value {
+        //             DataValue::Blob(blob) => {
+        //                 builder.push_bind(blob);
+        //             }
+        //             DataValue::Integer(integer) => {
+        //                 builder.push_bind(integer);
+        //             }
+        //             DataValue::Real(real) => {
+        //                 builder.push_bind(real);
+        //             }
+        //             DataValue::Text(text) => {
+        //                 builder.push_bind(text);
+        //             }
+        //         }
+        //     }
+        //     builder
+        //         .build_query_as::<'all, X>()
+        //         .fetch_all(&self.pool)
+        //         .await
+        // }
+
+        pub fn insert(mut self, table_name: String) -> Self {
+            let sql = format!("insert into {} ", table_name.as_str());
+            self.sql.push_str(sql.as_str());
+            self
+        }
+
+        pub fn values(mut self, insert: impl Insert) -> Self {
+            self.push(insert.insert_clause_sql());
+            self.values.extend(insert.values().into_iter());
+            self
+        }
+
+        pub async fn execute(&self) -> Result<QueryResult, sqlx::Error> {
+            let sql = self.sql();
+            let mut query = sqlx::query(&sql);
+            for value in &self.values {
+                query = match value {
+                    DataValue::Blob(b) => query.bind(b),
+                    DataValue::Integer(integer) => query.bind(integer),
+                    DataValue::Real(real) => query.bind(real),
+                    DataValue::Text(text) => query.bind(text),
+                };
+            }
+            query.execute(&self.pool).await
+        }
+
+        fn build_as<'a, T>(
+            &'a self,
+        ) -> sqlx::query::QueryAs<Driver, T, sqlx::sqlite::SqliteArguments<'a>>
+        where
+            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow>,
+        {
+            let mut query = sqlx::query_as::<Driver, T>(&self.sql);
+            for value in &self.values {
+                query = match value {
+                    DataValue::Blob(b) => query.bind(b),
+                    DataValue::Integer(integer) => query.bind(integer),
+                    DataValue::Real(real) => query.bind(real),
+                    DataValue::Text(text) => query.bind(text),
+                };
+            }
+            query
+        }
+
+        pub async fn rows_affected(&self) -> Result<u64, RizzleError> {
+            Ok(self.execute().await?.rows_affected())
+        }
+
+        pub async fn last_insert_rowid(&self) -> Result<i64, RizzleError> {
+            Ok(self.execute().await?.last_insert_rowid())
+        }
+
+        pub async fn all<T>(&self) -> Result<Vec<T>, RizzleError>
+        where
+            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
+        {
+            Ok(self.build_as::<T>().fetch_all(&self.pool).await?)
+        }
+
+        pub async fn returning<T>(mut self) -> Result<T, RizzleError>
+        where
+            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin + std::fmt::Debug,
+        {
+            self.push("returning *");
+            let rows = self.build_as::<T>().fetch_all(&self.pool).await?;
+            Ok(rows.into_iter().nth(0).ok_or(RizzleError::RowNotFound)?)
+        }
+    }
+
+    pub fn eq(left: &str, right: impl Into<DataValue>) -> Bind1 {
+        Bind1 {
+            sql: format!("{} = ?", left),
+            value: right.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RizzleError {
+    Database,
+    Connection,
+    PoolClosed,
+    RowNotFound,
+}
+
+impl From<sqlx::Error> for RizzleError {
+    fn from(value: sqlx::Error) -> Self {
+        match value {
+            sqlx::Error::Configuration(_) => todo!(),
+            sqlx::Error::Database(err) => {
+                dbg!(&err);
+                return RizzleError::Database;
+            }
+            sqlx::Error::Io(_) => todo!(),
+            sqlx::Error::Tls(_) => todo!(),
+            sqlx::Error::Protocol(_) => todo!(),
+            sqlx::Error::RowNotFound => RizzleError::RowNotFound,
+            sqlx::Error::TypeNotFound { type_name } => todo!(),
+            sqlx::Error::ColumnIndexOutOfBounds { index, len } => todo!(),
+            sqlx::Error::ColumnNotFound(_) => todo!(),
+            sqlx::Error::ColumnDecode { index, source } => todo!(),
+            sqlx::Error::Decode(_) => todo!(),
+            sqlx::Error::AnyDriverError(_) => todo!(),
+            sqlx::Error::PoolTimedOut => todo!(),
+            sqlx::Error::PoolClosed => RizzleError::PoolClosed,
+            sqlx::Error::WorkerCrashed => todo!(),
+            sqlx::Error::Migrate(_) => todo!(),
+            _ => unimplemented!(),
+        }
+    }
 }
 
 #[derive(FromRow, Debug)]
-struct TableName(String);
+pub struct TableName(String);
 
 #[derive(FromRow, Debug)]
-struct IndexName(String);
+pub struct IndexName(String);
 
-#[derive(Clone)]
-struct Database {
-    pool: SqlitePool,
+pub trait Select {
+    fn new() -> Self;
+    fn sql(&self) -> String;
 }
 
-impl Database {
-    pub async fn new(filename: String) -> Self {
-        Self {
-            pool: Self::pool(&filename).await,
-        }
-    }
+pub trait Insert {
+    fn new() -> Self;
+    fn values(&self) -> Vec<DataValue>;
+    fn values_sql(&self) -> String;
+    fn insert_clause_sql(&self) -> String;
+}
 
-    async fn pool(filename: &str) -> SqlitePool {
-        SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(Self::connection_options(filename))
-            .await
-            .unwrap()
-    }
+fn on(left: &str, right: &str) -> String {
+    format!("{} = {}", left, right)
+}
 
-    fn connection_options(filename: &str) -> SqliteConnectOptions {
-        let options: SqliteConnectOptions = filename.parse().unwrap();
-        options
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(Duration::from_secs(30))
-    }
+macro_rules! asc {
+    ($($columns:tt)*) => {{
+        let cols: Vec<&str> = vec![$($columns)*];
+        let cols = cols.join(", ");
+        format!("{} asc", cols)
+    }}
+}
 
-    async fn table_names(&self) -> Vec<TableName> {
-        if let Ok(table_names) = query_as("select name from sqlite_schema where type = 'table'")
-            .fetch_all(&self.pool)
-            .await
-        {
-            table_names
-        } else {
-            vec![]
-        }
-    }
-
-    async fn index_names(&self) -> Vec<IndexName> {
-        if let Ok(names) = query_as("select name from sqlite_schema where type = 'index'")
-            .fetch_all(&self.pool)
-            .await
-        {
-            names
-        } else {
-            vec![]
-        }
-    }
-
-    async fn columns(&self) -> Vec<Column> {
-        let column_defs: Vec<ColumnDef> = sqlx::query_as("select s.name as table_name, pti.name as name, pti.type as data_type, pti.pk as primary_key, pti.dflt_value as default_value, pti.[notnull] as not_null from sqlite_schema s left outer join pragma_table_info((s.name)) pti on pti.name <> s.name where s.type = 'table'").fetch_all(&self.pool).await.unwrap();
-        column_defs
-            .into_iter()
-            .map(|cd| cd.into())
-            .collect::<Vec<_>>()
-    }
-
-    async fn references(&self) -> Vec<Reference> {
-        vec![]
-    }
-
-    async fn execute(&self, sql: &str) -> Result<(), sqlx::Error> {
-        let _ = self.pool.execute(sql).await?;
-        Ok(())
-    }
-
-    /// sync given a vector of impl Table will migrate the database to a new state
-    async fn sync(&self, tables: Vec<&dyn Table>) -> Result<(), sqlx::Error> {
-        // 6 parts:
-        // create tables
-        // drop tables
-        // add columns
-        // drop columns
-        // create indexes
-        // drop indexes
-
-        let table_names = self.table_names().await;
-        let create_tables_sql = create_tables_sql(&table_names, &tables);
-        let _ = self.execute(&create_tables_sql).await?;
-
-        let table_names = self.table_names().await;
-        let drop_tables_sql = drop_tables_sql(&table_names, &tables);
-        let _ = self.execute(&drop_tables_sql).await?;
-
-        let db_columns = self.columns().await;
-        let new_columns: Vec<_> = tables.iter().flat_map(|t| t.columns()).collect();
-        let columns_to_add = columns_to_add(db_columns, new_columns);
-        let add_columns_sql = add_columns_sql(columns_to_add);
-        let _ = self.execute(&add_columns_sql).await?;
-
-        let db_columns = self.columns().await;
-        let new_columns: Vec<_> = tables.iter().flat_map(|t| t.columns()).collect();
-        let drop_columns_sql = drop_columns_sql(db_columns, new_columns);
-        let _ = self.execute(&drop_columns_sql).await?;
-
-        let index_names = self
-            .index_names()
-            .await
-            .into_iter()
-            .map(|idx| idx.0)
-            .collect::<Vec<_>>();
-        let create_indexes_sql = create_indexes_sql(&tables, index_names);
-        let _ = self.execute(&create_indexes_sql).await?;
-
-        let index_names = self
-            .index_names()
-            .await
-            .into_iter()
-            .map(|idx| idx.0)
-            .collect::<Vec<_>>();
-        let drop_indexes_sql = drop_indexes_sql(tables, index_names);
-        let _ = self.execute(&drop_indexes_sql);
-
-        Ok(())
-    }
+macro_rules! desc {
+    ($($columns:tt)*) => {{
+        let cols: Vec<&str> = vec![$($columns)*];
+        let cols = cols.join(", ");
+        format!("{} desc", cols)
+    }}
 }
 
 /// sync! macro helper for db migrations
@@ -412,14 +812,17 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
         .collect::<Vec<_>>()
         .join(";")
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sqlite::Text;
-    use macros::Table;
+    use crate::sqlite::{eq, Bind, DataValue, Database, Text};
+    use macros::{Insert, Select, Table};
+    use std::sync::OnceLock;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     async fn db() -> Database {
-        Database::new("sqlite://:memory:".to_string()).await
+        Database::connect("sqlite://:memory:").await.unwrap()
     }
 
     #[tokio::test]
@@ -587,7 +990,7 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Table)]
+    #[derive(Table, Clone, Copy)]
     #[rizzle(table = "users")]
     struct Users {
         #[rizzle(primary_key)]
@@ -609,7 +1012,15 @@ mod tests {
         posts: sqlite::Many,
     }
 
-    #[derive(Table)]
+    #[derive(FromRow, Default, Debug)]
+    struct User {
+        id: i64,
+        name: String,
+        created_at: f64,
+        updated_at: f64,
+    }
+
+    #[derive(Table, Clone, Copy)]
     #[rizzle(table = "posts")]
     struct Posts {
         #[rizzle(primary_key)]
@@ -634,5 +1045,123 @@ mod tests {
         let posts = Posts::new();
         assert_eq!("create table users (id integer primary key, name text not null, created_at real not null, updated_at real not null)", users.create_sql());
         assert_eq!("create table posts (id integer primary key, body text not null, created_at real not null, updated_at real not null, user_id integer not null references users(id))", posts.create_sql())
+    }
+
+    #[tokio::test]
+    async fn select_star_works() {
+        let db = db().await;
+        let users = Users::new();
+        assert_eq!("select * from users", db.select().from(users).sql())
+    }
+
+    #[tokio::test]
+    async fn partial_select_works() {
+        let db = db().await;
+        let users = Users::new();
+
+        #[derive(Select)]
+        struct SimpleUser {
+            id: i64,
+            name: String,
+        }
+
+        let simple_user = SimpleUser::new();
+
+        assert_eq!(
+            "select id, name from users",
+            db.select_with(simple_user).from(users).sql()
+        )
+    }
+
+    #[tokio::test]
+    async fn inner_join_works() {
+        let db = db().await;
+        let users = Users::new();
+        let posts = Posts::new();
+
+        assert_eq!(
+            "select * from users inner join posts on posts.user_id = users.id",
+            db.select()
+                .from(users)
+                .inner_join(posts, on(posts.user_id, users.id))
+                .sql()
+        )
+    }
+
+    #[test]
+    fn asc_works() {
+        let users = Users::new();
+        assert_eq!("users.id, users.name asc", asc!(users.id, users.name))
+    }
+
+    #[tokio::test]
+    async fn order_by_works() {
+        let db = db().await;
+        let users = Users::new();
+        assert_eq!(
+            "select * from users order by users.id, users.name desc",
+            db.select()
+                .from(users)
+                .order_by(desc!(users.id, users.name))
+                .sql()
+        )
+    }
+
+    #[derive(Insert, Default)]
+    struct NewUser {
+        name: String,
+        created_at: f64,
+        updated_at: f64,
+    }
+
+    #[tokio::test]
+    async fn insert_one_row_works() -> Result<(), RizzleError> {
+        let db = db().await;
+        let users = Users::new();
+        let _ = sync!(db, users).await;
+        assert_eq!(1, db.table_names().await.len());
+        let new_user = NewUser::default();
+        let rows_affected = db.insert(users).values(new_user).rows_affected().await?;
+        assert_eq!(1, rows_affected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_one_row_with_returning_works() -> Result<(), RizzleError> {
+        let db = db().await;
+        let users = Users::new();
+        let _ = sync!(db, users).await;
+        let new_user = NewUser::default();
+        let user = db
+            .insert(users)
+            .values(new_user)
+            .returning::<User>()
+            .await?;
+        assert_eq!(1, user.id);
+        assert_eq!("", user.name);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn where_with_equals_works() -> Result<(), RizzleError> {
+        let db = db().await;
+        let users = Users::new();
+        let _ = sync!(db, users).await?;
+        let _ = db
+            .insert(users)
+            .values(NewUser::default())
+            .rows_affected()
+            .await?;
+        let query = db.select().from(users).r#where(eq(users.id, 1));
+        let users = query.all::<User>().await?;
+        assert_eq!(1, users.len());
+        Ok(())
+    }
+
+    fn now() -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
     }
 }
