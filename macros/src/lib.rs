@@ -499,3 +499,38 @@ fn update_macro(input: DeriveInput) -> Result<TokenStream2> {
         }
     })
 }
+
+#[proc_macro_derive(Row, attributes(rizzle))]
+pub fn row(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match row_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let insert_token_stream = insert_macro(input.clone())?;
+    let update_token_stream = update_macro(input.clone())?;
+    let struct_name = input.ident;
+    let fields = fields(&input.data);
+    let attrs = &fields.iter().map(|(ident, _)| ident).collect::<Vec<_>>();
+    let gets = &fields
+        .iter()
+        .map(|(ident, _)| {
+            let lit_str = ident.to_string();
+            return quote! { let #ident = row.try_get(#lit_str)?; };
+        })
+        .collect::<Vec<_>>();
+    Ok(quote! {
+        #insert_token_stream
+        #update_token_stream
+        impl<'r> FromRow<'r, sqlite::SqliteRow> for #struct_name {
+            fn from_row(row: &'r sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+                #(#gets)*
+
+                Ok(#struct_name { #(#attrs,)* })
+            }
+        }
+    })
+}

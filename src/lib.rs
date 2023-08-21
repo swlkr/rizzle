@@ -1,7 +1,7 @@
 #![allow(unused)]
 use sqlite::DataValue;
-pub use sqlx::FromRow;
 use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
+pub use sqlx::{FromRow, Row};
 use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
 
 #[derive(FromRow)]
@@ -156,15 +156,12 @@ pub trait Table {
 
 pub mod sqlite {
     use super::*;
-    pub use sqlx::sqlite::SqliteConnectOptions as ConnectOptions;
-    pub use sqlx::sqlite::SqliteJournalMode as JournalMode;
-    pub use sqlx::sqlite::SqlitePoolOptions as PoolOptions;
-    pub use sqlx::sqlite::SqliteQueryResult as QueryResult;
-    pub use sqlx::sqlite::SqliteSynchronous as Synchronous;
-    pub use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
-    pub use sqlx::Sqlite as Driver;
-    pub use sqlx::SqlitePool as Pool;
-    pub use sqlx::{QueryBuilder, Row, Type};
+    pub use sqlx::sqlite::{
+        SqliteConnectOptions as ConnectOptions, SqliteJournalMode as JournalMode,
+        SqlitePoolOptions as PoolOptions, SqliteQueryResult as QueryResult, SqliteRow,
+        SqliteSynchronous as Synchronous,
+    };
+    use sqlx::{QueryBuilder, Sqlite as Driver, SqlitePool as Pool, Type};
     pub type Integer = &'static str;
     pub type Text = &'static str;
     pub type Blob = &'static str;
@@ -193,6 +190,12 @@ pub mod sqlite {
     impl From<i64> for DataValue {
         fn from(value: i64) -> Self {
             Self::Integer(value)
+        }
+    }
+
+    impl From<&str> for DataValue {
+        fn from(value: &str) -> Self {
+            Self::Text(value.to_owned())
         }
     }
 
@@ -800,7 +803,7 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
 mod tests {
     use super::*;
     use crate::sqlite::{eq, DataValue, Database, Text};
-    use macros::{Insert, New, Select, Table, Update};
+    use macros::{Insert, New, Row, Select, Table, Update};
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1194,6 +1197,61 @@ mod tests {
         assert_eq!(deleted_rows, 1);
         let user_rows: Vec<User> = db.select().from(users).all().await?;
         assert_eq!(user_rows.len(), 0);
+        Ok(())
+    }
+
+    #[derive(Table, Clone, Copy)]
+    #[rizzle(table = "comments")]
+    struct Comments {
+        #[rizzle(primary_key)]
+        id: sqlite::Integer,
+        #[rizzle(not_null)]
+        body: sqlite::Text,
+    }
+
+    #[derive(Row, Debug)]
+    struct Comment {
+        id: i64,
+        body: String,
+    }
+
+    #[tokio::test]
+    async fn derive_row_for_basic_crud() -> Result<(), RizzleError> {
+        let db = db().await;
+        let comments = Comments::new();
+        let _ = sync!(db, comments).await?;
+        let inserted_comment: Comment = db
+            .insert(comments)
+            .values(Comment {
+                id: 1,
+                body: "".to_owned(),
+            })
+            .returning()
+            .await?;
+        assert_eq!(inserted_comment.id, 1);
+        assert_eq!(inserted_comment.body, "");
+        let comment_rows: Vec<Comment> = db.select().from(comments).all().await?;
+        assert_eq!(comment_rows.len(), 1);
+        let updated_comment: Comment = db
+            .update(comments)
+            .set(Comment {
+                body: "comment".to_owned(),
+                ..inserted_comment
+            })
+            .returning()
+            .await?;
+        assert_eq!(updated_comment.id, 1);
+        assert_eq!(updated_comment.body, "comment");
+        let comment_rows: Vec<Comment> = db.select().from(comments).all().await?;
+        assert_eq!(comment_rows.len(), 1);
+        let deleted_comment: Comment = db
+            .delete(comments)
+            .r#where(eq(comments.id, 1))
+            .returning()
+            .await?;
+        assert_eq!(deleted_comment.id, 1);
+        let comment_rows: Vec<Comment> = db.select().from(comments).all().await?;
+        assert_eq!(comment_rows.len(), 0);
         Ok(())
     }
 }
