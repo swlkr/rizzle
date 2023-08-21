@@ -1,6 +1,7 @@
 #![allow(unused)]
 use sqlite::DataValue;
-use sqlx::{query_as, Arguments, Encode, Executor, FromRow, IntoArguments};
+pub use sqlx::FromRow;
+use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
 use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
 
 #[derive(FromRow)]
