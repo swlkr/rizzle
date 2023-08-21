@@ -71,8 +71,45 @@ struct Post {
 
 fn main() -> Result<(), RizzleError> {
   let db = Database::connect("sqlite://:memory:").await?;
-  // called sometime after sync!
+  let _ = sync!(db, comments).await?;
   let post: Post = db.insert(posts).values(Post { id: 1, body: "".to_owned() }).returning().await?;
   Ok(())
+}
+```
+
+# Updating rows
+
+```rust
+use rizzle::{Database, Table, sqlite, eq};
+
+#[derive(Table, Clone, Copy)]
+#[rizzle(table = "comments")]
+struct Comments {
+    #[rizzle(primary_key)]
+    id: sqlite::Integer,
+    #[rizzle(not_null)]
+    body: sqlite::Text,
+}
+
+#[derive(Row, Debug)]
+struct Comment {
+    id: i64,
+    body: String,
+}
+
+#[tokio::test]
+async fn main() -> Result<(), RizzleError> {
+    let db = db().await;
+    let comments = Comments::new();
+    let _ = sync!(db, comments).await?;
+    let _ = db
+        .update(comments)
+        .set(Comment {
+            body: "comment".to_owned(),
+            ..inserted_comment
+        })
+        .rows_affected()
+        .await?;
+    Ok(())
 }
 ```
