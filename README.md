@@ -101,7 +101,18 @@ struct Comment {
 async fn main() -> Result<(), RizzleError> {
     let db = db().await;
     let comments = Comments::new();
+
     let _ = sync!(db, comments).await?;
+
+    let inserted_comment: Comment = db
+    .insert(comments)
+    .values(Comment {
+        id: 1,
+        body: "".to_owned(),
+    })
+    .returning()
+    .await?;
+
     let _ = db
         .update(comments)
         .set(Comment {
@@ -110,6 +121,7 @@ async fn main() -> Result<(), RizzleError> {
         })
         .rows_affected()
         .await?;
+
     Ok(())
 }
 ```
