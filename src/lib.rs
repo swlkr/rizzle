@@ -374,7 +374,7 @@ pub mod sqlite {
         }
 
         /// sync given a vector of impl Table will migrate the database to a new state
-        pub async fn sync(&self, tables: Vec<&dyn Table>) -> Result<(), sqlx::Error> {
+        pub async fn sync(&self, tables: Vec<&dyn Table>) -> Result<(), RizzleError> {
             // 6 parts:
             // create tables
             // drop tables
@@ -434,28 +434,19 @@ pub mod sqlite {
         pub fn insert(&self, insert: impl Table) -> Query {
             Query::new(self.pool.clone()).insert(insert.name())
         }
+
+        pub fn update(&self, update: impl Table) -> Query {
+            Query::new(self.pool.clone()).update(update.name())
+        }
+
+        pub fn delete(&self, delete: impl Table) -> Query {
+            Query::new(self.pool.clone()).delete(delete.name())
+        }
     }
 
-    pub struct Bind1 {
+    pub struct Bind {
         sql: String,
         value: DataValue,
-    }
-
-    pub struct Bind<T>
-    where
-        T: for<'a> Encode<'a, Driver> + Send + Type<Driver>,
-    {
-        sql: String,
-        value: Box<T>,
-    }
-
-    impl<T> Bind<T>
-    where
-        T: for<'a> Encode<'a, Driver> + Send + Type<Driver>,
-    {
-        pub fn new(sql: String, value: Box<T>) -> Self {
-            Self { sql, value }
-        }
     }
 
     pub struct Query {
@@ -477,7 +468,7 @@ pub mod sqlite {
             self.sql.push_str(&format!("{} ", sql));
         }
 
-        fn push_bind(&mut self, bind: Bind1) {
+        fn push_bind(&mut self, bind: Bind) {
             self.sql.push_str(&format!("{} ", bind.sql));
             self.values.push(bind.value);
         }
@@ -488,7 +479,7 @@ pub mod sqlite {
         }
 
         pub fn select_with(mut self, sel: impl Select) -> Self {
-            self.push(sel.sql());
+            self.push(sel.select_sql());
             self
         }
 
@@ -498,7 +489,7 @@ pub mod sqlite {
             self
         }
 
-        pub fn r#where(mut self, bind: Bind1) -> Self {
+        pub fn r#where(mut self, bind: Bind) -> Self {
             self.push("where");
             self.push_bind(bind);
             self
@@ -543,33 +534,6 @@ pub mod sqlite {
             self.sql.as_str().trim_end().to_owned()
         }
 
-        // pub async fn all<'X>(&'all self) -> Result<Vec<X>, sqlx::Error>
-        // where
-        //     X: for<'x> FromRow<'x, SqliteRow> + Send + Unpin,
-        // {
-        //     let mut builder = QueryBuilder::new(&self.sql);
-        //     for value in &self.values {
-        //         match value {
-        //             DataValue::Blob(blob) => {
-        //                 builder.push_bind(blob);
-        //             }
-        //             DataValue::Integer(integer) => {
-        //                 builder.push_bind(integer);
-        //             }
-        //             DataValue::Real(real) => {
-        //                 builder.push_bind(real);
-        //             }
-        //             DataValue::Text(text) => {
-        //                 builder.push_bind(text);
-        //             }
-        //         }
-        //     }
-        //     builder
-        //         .build_query_as::<'all, X>()
-        //         .fetch_all(&self.pool)
-        //         .await
-        // }
-
         pub fn insert(mut self, table_name: String) -> Self {
             let sql = format!("insert into {} ", table_name.as_str());
             self.sql.push_str(sql.as_str());
@@ -577,8 +541,8 @@ pub mod sqlite {
         }
 
         pub fn values(mut self, insert: impl Insert) -> Self {
-            self.push(insert.insert_clause_sql());
-            self.values.extend(insert.values().into_iter());
+            self.push(insert.insert_sql());
+            self.values.extend(insert.insert_values().into_iter());
             self
         }
 
@@ -637,10 +601,26 @@ pub mod sqlite {
             let rows = self.build_as::<T>().fetch_all(&self.pool).await?;
             Ok(rows.into_iter().nth(0).ok_or(RizzleError::RowNotFound)?)
         }
+
+        pub fn update(mut self, table_name: String) -> Self {
+            self.push(format!("update {}", table_name));
+            self
+        }
+
+        pub fn set(mut self, table: impl Update) -> Self {
+            self.push(table.update_sql());
+            self.values.extend(table.update_values());
+            self
+        }
+
+        fn delete(mut self, table_name: String) -> Self {
+            self.push(format!("delete from {}", table_name));
+            self
+        }
     }
 
-    pub fn eq(left: &str, right: impl Into<DataValue>) -> Bind1 {
-        Bind1 {
+    pub fn eq(left: &str, right: impl Into<DataValue>) -> Bind {
+        Bind {
             sql: format!("{} = ?", left),
             value: right.into(),
         }
@@ -659,10 +639,7 @@ impl From<sqlx::Error> for RizzleError {
     fn from(value: sqlx::Error) -> Self {
         match value {
             sqlx::Error::Configuration(_) => todo!(),
-            sqlx::Error::Database(err) => {
-                dbg!(&err);
-                return RizzleError::Database;
-            }
+            sqlx::Error::Database(err) => RizzleError::Database,
             sqlx::Error::Io(_) => todo!(),
             sqlx::Error::Tls(_) => todo!(),
             sqlx::Error::Protocol(_) => todo!(),
@@ -688,16 +665,22 @@ pub struct TableName(String);
 #[derive(FromRow, Debug)]
 pub struct IndexName(String);
 
-pub trait Select {
+pub trait New {
     fn new() -> Self;
-    fn sql(&self) -> String;
+}
+
+pub trait Select {
+    fn select_sql(&self) -> String;
 }
 
 pub trait Insert {
-    fn new() -> Self;
-    fn values(&self) -> Vec<DataValue>;
-    fn values_sql(&self) -> String;
-    fn insert_clause_sql(&self) -> String;
+    fn insert_values(&self) -> Vec<DataValue>;
+    fn insert_sql(&self) -> String;
+}
+
+pub trait Update {
+    fn update_values(&self) -> Vec<DataValue>;
+    fn update_sql(&self) -> String;
 }
 
 fn on(left: &str, right: &str) -> String {
@@ -789,7 +772,6 @@ fn columns_to_add(db_columns: Vec<Column>, code_columns: Vec<Column>) -> Vec<Col
         .iter()
         .map(|c| c.full_name())
         .collect::<Vec<_>>();
-    // dbg!(&code_column_names);
     let result = code_columns
         .into_iter()
         .filter(|c| !db_column_names.contains(&c.full_name()))
@@ -817,8 +799,8 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sqlite::{eq, Bind, DataValue, Database, Text};
-    use macros::{Insert, Select, Table};
+    use crate::sqlite::{eq, DataValue, Database, Text};
+    use macros::{Insert, New, Select, Table, Update};
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -879,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_with_added_columns_works() -> Result<(), sqlx::Error> {
+    async fn sync_with_added_columns_works() -> Result<(), RizzleError> {
         let a = A::new();
         let db = db().await;
         let _ = sync!(db, a).await?;
@@ -912,7 +894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_table_works() -> Result<(), sqlx::Error> {
+    async fn drop_table_works() -> Result<(), RizzleError> {
         let db = db().await;
         assert_eq!(0, db.table_names().await.len());
 
@@ -940,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_indexes_works() -> Result<(), sqlx::Error> {
+    async fn create_indexes_works() -> Result<(), RizzleError> {
         let db = db().await;
         assert_eq!(0, db.index_names().await.len());
 
@@ -959,7 +941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_indexes_works() -> Result<(), sqlx::Error> {
+    async fn drop_indexes_works() -> Result<(), RizzleError> {
         let db = db().await;
         assert_eq!(0, db.index_names().await.len());
 
@@ -975,7 +957,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_columns_works() -> Result<(), sqlx::Error> {
+    async fn drop_columns_works() -> Result<(), RizzleError> {
         let db = db().await;
         assert_eq!(0, db.columns().await.len());
 
@@ -1013,7 +995,7 @@ mod tests {
         posts: sqlite::Many,
     }
 
-    #[derive(FromRow, Default, Debug)]
+    #[derive(FromRow, Default, Debug, Update)]
     struct User {
         id: i64,
         name: String,
@@ -1060,7 +1042,7 @@ mod tests {
         let db = db().await;
         let users = Users::new();
 
-        #[derive(Select)]
+        #[derive(New, Select)]
         struct SimpleUser {
             id: i64,
             name: String,
@@ -1164,5 +1146,54 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64()
+    }
+
+    #[tokio::test]
+    async fn update_works() -> Result<(), RizzleError> {
+        let db = db().await;
+        let users = Users::new();
+        let _ = sync!(db, users).await?;
+        let user = db
+            .insert(users)
+            .values(NewUser::default())
+            .returning::<User>()
+            .await?;
+        assert_eq!(user.name, "");
+        let updated_user = db
+            .update(users)
+            .set(User {
+                name: "new name".to_owned(),
+                updated_at: now(),
+                ..user
+            })
+            .r#where(eq(users.id, 1))
+            .returning::<User>()
+            .await?;
+        assert_eq!(updated_user.id, user.id);
+        assert_eq!(updated_user.name, "new name");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_works() -> Result<(), RizzleError> {
+        let db = db().await;
+        let users = Users::new();
+        let _ = sync!(db, users).await?;
+        let user = db
+            .insert(users)
+            .values(NewUser::default())
+            .returning::<User>()
+            .await?;
+        let user_rows: Vec<User> = db.select().from(users).all().await?;
+        assert_eq!(user_rows.len(), 1);
+        let deleted_rows = db
+            .delete(users)
+            .r#where(eq(users.id, user.id))
+            .rows_affected()
+            .await?;
+        assert_eq!(deleted_rows, 1);
+        let user_rows: Vec<User> = db.select().from(users).all().await?;
+        assert_eq!(user_rows.len(), 0);
+        Ok(())
     }
 }
