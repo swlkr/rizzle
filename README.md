@@ -16,7 +16,7 @@ cargo add rizzle
 use rizzle::Database;
 
 #[tokio::main]
-fn main() -> Result<(), RizzleError> {
+async fn main() -> Result<(), RizzleError> {
   let db = Database::connect("sqlite://:memory:").await?;
 
   // if you need more options, you can use DatabaseOptions
@@ -42,7 +42,8 @@ struct Posts {
   body: Text
 }
 
-fn main() -> Result<(), RizzleError> {
+#[tokio::main]
+async fn main() -> Result<(), RizzleError> {
   let db = Database::connect("sqlite://:memory:").await?;
   let _ = sync!(db, posts).await;
   Ok(())
@@ -69,7 +70,8 @@ struct Post {
   body: String
 }
 
-fn main() -> Result<(), RizzleError> {
+#[tokio::main]
+async fn main() -> Result<(), RizzleError> {
   let db = Database::connect("sqlite://:memory:").await?;
   let _ = sync!(db, comments).await?;
   let post: Post = db.insert(posts).values(Post { id: 1, body: "".to_owned() }).returning().await?;
@@ -97,7 +99,7 @@ struct Comment {
     body: String,
 }
 
-#[tokio::test]
+#[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let db = db().await;
     let comments = Comments::new();
