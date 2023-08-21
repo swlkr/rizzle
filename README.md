@@ -127,3 +127,38 @@ async fn main() -> Result<(), RizzleError> {
     Ok(())
 }
 ```
+
+# Deleting rows
+
+```rust
+use rizzle::{Database, Table, sqlite, eq};
+
+#[derive(Table, Clone, Copy)]
+#[rizzle(table = "comments")]
+struct Comments {
+    #[rizzle(primary_key)]
+    id: sqlite::Integer,
+    #[rizzle(not_null)]
+    body: sqlite::Text,
+}
+
+#[derive(Row)]
+struct Comment {
+    id: i64,
+    body: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), RizzleError> {
+    let db = db().await;
+    let comments = Comments::new();
+    // don't forget to sync!
+    let comment: Comment = db
+        .delete(comments)
+        .where(eq(comments.id, 1))
+        .returning()
+        .await?;
+
+    Ok(())
+}
+```
