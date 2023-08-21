@@ -91,7 +91,7 @@ struct Comments {
     body: sqlite::Text,
 }
 
-#[derive(Row, Debug)]
+#[derive(Row)]
 struct Comment {
     id: i64,
     body: String,
@@ -105,13 +105,13 @@ async fn main() -> Result<(), RizzleError> {
     let _ = sync!(db, comments).await?;
 
     let inserted_comment: Comment = db
-    .insert(comments)
-    .values(Comment {
-        id: 1,
-        body: "".to_owned(),
-    })
-    .returning()
-    .await?;
+      .insert(comments)
+      .values(Comment {
+          id: 1,
+          body: "".to_owned(),
+      })
+      .returning()
+      .await?;
 
     let _ = db
         .update(comments)
