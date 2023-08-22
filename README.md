@@ -101,7 +101,7 @@ struct Comment {
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = db().await;
+    let db = Database::connect("sqlite://:memory:").await?;
     let comments = Comments::new();
 
     let _ = sync!(db, comments).await?;
@@ -150,7 +150,7 @@ struct Comment {
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = db().await;
+    let db = Database::connect("sqlite://:memory:").await?;
     let comments = Comments::new();
     // don't forget to sync!
     let comment: Comment = db
@@ -191,14 +191,56 @@ struct PartialComment {
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = db().await;
+    let db = Database::connect("sqlite://:memory:").await?;
     let comments = Comments::new();
     // don't forget to sync!
     let rows: Vec<Comment> = db.select().from(comments).all().await;
-
     let partial_comment = PartialComment::new();
+    let partial_rows: Vec<PartialComment> = db.select_with(partial_comment).from(comments).all().await;
 
-    let partial_rows: Vec<CommentBody> = db.select_with(partial_comment).from(comments).all().await;
+    Ok(())
+}
+```
+
+# Joins
+
+```rust
+use rizzle::{Database, Table, sqlite, on};
+
+#[derive(Table, Clone, Copy)]
+#[rizzle(table = "comments")]
+struct Comments {
+    #[rizzle(primary_key)]
+    id: sqlite::Integer,
+    #[rizzle(not_null)]
+    body: sqlite::Text,
+    #[rizzle(not_null, references = "posts(id)")]
+    post_id: sqlite::Integer
+}
+
+#[derive(Table, Clone, Copy)]
+#[rizzle(table = "posts")]
+struct Posts {
+    #[rizzle(primary_key)]
+    id: sqlite::Integer,
+    #[rizzle(not_null)]
+    body: sqlite::Text,
+}
+
+#[derive(Row)]
+struct Comment {
+    id: i64,
+    body: String,
+    post_id: i64,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), RizzleError> {
+    let db = Database::connect("sqlite://:memory:").await?;
+    let posts = Posts::new();
+    let comments = Comments::new();
+    let _ = sync!(db, posts, comments).await?;
+    let rows: Vec<Comment> = db.select().from(comments).inner_join(posts, on(posts.id, comments.post_id)).all().await;
 
     Ok(())
 }
