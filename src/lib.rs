@@ -12,6 +12,10 @@ struct ColumnDef {
     not_null: bool,
     primary_key: bool,
     default_value: String,
+    fk_table: String,
+    fk_from: String,
+    fk_to: String,
+    fk_on_update: String,
 }
 
 #[derive(Default, PartialEq, Debug)]
@@ -84,17 +88,24 @@ impl From<ColumnDef> for Column {
             not_null,
             primary_key,
             default_value,
+            fk_table,
+            fk_from,
+            fk_to,
+            fk_on_update,
         } = value;
-        let default_value = if default_value.is_empty() {
-            None
-        } else {
-            Some(default_value)
+        let default_value = match default_value.is_empty() {
+            true => None,
+            false => Some(default_value),
         };
         let data_type = match data_type.to_ascii_lowercase().as_ref() {
             "text" => sqlite::DataType::Text,
             "integer" => sqlite::DataType::Integer,
             "real" => sqlite::DataType::Real,
             _ => sqlite::DataType::Blob,
+        };
+        let references = match !fk_table.is_empty() {
+            true => Some(format!("{}({})", fk_table, fk_to)),
+            false => None,
         };
         Column {
             table_name,
@@ -103,7 +114,7 @@ impl From<ColumnDef> for Column {
             not_null,
             primary_key,
             default_value,
-            ..Default::default()
+            references,
         }
     }
 }
@@ -347,7 +358,24 @@ pub mod sqlite {
         }
 
         pub async fn columns(&self) -> Vec<Column> {
-            let sql = "select s.name as table_name, pti.name as name, pti.type as data_type, pti.pk as primary_key, pti.dflt_value as default_value, pti.[notnull] as not_null from sqlite_schema s left outer join pragma_table_info((s.name)) pti on pti.name <> s.name where s.type = 'table'";
+            let sql = r#"
+                select
+                    s.name as table_name,
+                    pti.name as name,
+                    pti.type as data_type,
+                    pti.pk as primary_key,
+                    pti.dflt_value as default_value,
+                    pti.[notnull] as not_null,
+                    fkl.[table] as fk_table,
+                    fkl.[from] as fk_from,
+                    fkl.[to] as fk_to,
+                    fkl.[on_update] as fk_on_update,
+                    fkl.[on_delete] as fk_on_delete
+                from sqlite_schema s
+                left outer join pragma_table_info((s.name)) pti on pti.name <> s.name
+                left outer join pragma_foreign_key_list((s.name)) fkl on fkl.[table] <> s.name and fkl.[from] = pti.name
+                where s.type = 'table';
+            "#;
             let column_defs: Vec<ColumnDef> =
                 sqlx::query_as(sql).fetch_all(&self.pool).await.unwrap();
             column_defs
@@ -549,7 +577,7 @@ pub mod sqlite {
             self
         }
 
-        pub async fn execute(&self) -> Result<QueryResult, sqlx::Error> {
+        pub async fn execute(&self) -> Result<QueryResult, RizzleError> {
             let sql = self.sql();
             let mut query = sqlx::query(&sql);
             for value in &self.values {
@@ -560,7 +588,8 @@ pub mod sqlite {
                     DataValue::Text(text) => query.bind(text),
                 };
             }
-            query.execute(&self.pool).await
+            let result = query.execute(&self.pool).await?;
+            Ok(result)
         }
 
         fn build_as<'a, T>(
@@ -632,7 +661,7 @@ pub mod sqlite {
 
 #[derive(Debug)]
 pub enum RizzleError {
-    Database,
+    Database(String),
     Connection,
     PoolClosed,
     RowNotFound,
@@ -642,7 +671,7 @@ impl From<sqlx::Error> for RizzleError {
     fn from(value: sqlx::Error) -> Self {
         match value {
             sqlx::Error::Configuration(_) => todo!(),
-            sqlx::Error::Database(err) => RizzleError::Database,
+            sqlx::Error::Database(err) => RizzleError::Database(err.message().to_owned()),
             sqlx::Error::Io(_) => todo!(),
             sqlx::Error::Tls(_) => todo!(),
             sqlx::Error::Protocol(_) => todo!(),
@@ -720,8 +749,8 @@ macro_rules! desc {
 /// let posts = Posts::new();
 /// if let Ok(_) = sync!(db, posts).await {}
 macro_rules! sync {
-    ($db:ident $(, $tables:expr)*) => {{
-        $db.sync(vec![$(&$tables)*])
+    ($db:ident $(,$tables:tt)*) => {{
+        $db.sync(vec![$(&$tables,)*])
     }};
 }
 
@@ -802,7 +831,7 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sqlite::{eq, DataValue, Database, Text};
+    use crate::sqlite::{eq, DataValue, Database, DatabaseOptions, Text};
     use macros::{Insert, New, Row, Select, Table, Update};
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -998,7 +1027,7 @@ mod tests {
         posts: sqlite::Many,
     }
 
-    #[derive(FromRow, Default, Debug, Update)]
+    #[derive(Row, Default, Debug)]
     struct User {
         id: i64,
         name: String,
@@ -1023,6 +1052,15 @@ mod tests {
 
         #[rizzle(not_null, references = "users(id)")]
         user_id: sqlite::Integer,
+    }
+
+    #[derive(Row, Default, Debug)]
+    struct Post {
+        id: i64,
+        body: String,
+        created_at: f64,
+        updated_at: f64,
+        user_id: i64,
     }
 
     #[test]
@@ -1062,18 +1100,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inner_join_works() {
-        let db = db().await;
+    async fn inner_join_works() -> Result<(), RizzleError> {
+        let db = Database::connect("sqlite://:memory:").await?;
         let users = Users::new();
         let posts = Posts::new();
-
-        assert_eq!(
-            "select * from users inner join posts on posts.user_id = users.id",
-            db.select()
-                .from(users)
-                .inner_join(posts, on(posts.user_id, users.id))
-                .sql()
-        )
+        let result = sync!(db, users, posts).await?;
+        let rows = db
+            .insert(users)
+            .values(User {
+                id: 1,
+                ..Default::default()
+            })
+            .rows_affected()
+            .await?;
+        let rows = db
+            .insert(posts)
+            .values(Post {
+                id: 1,
+                user_id: 1,
+                ..Default::default()
+            })
+            .rows_affected()
+            .await?;
+        let rows: Vec<Post> = db
+            .select()
+            .from(posts)
+            .inner_join(users, on(users.id, posts.user_id))
+            .all()
+            .await?;
+        Ok(())
     }
 
     #[test]
