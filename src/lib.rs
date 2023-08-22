@@ -1041,22 +1041,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn partial_select_works() {
+    async fn partial_select_works() -> Result<(), RizzleError> {
         let db = db().await;
         let users = Users::new();
+        let _ = sync!(db, users).await?;
 
-        #[derive(New, Select)]
-        struct SimpleUser {
+        #[derive(New, Row)]
+        struct PartialUser {
             id: i64,
             name: String,
         }
 
-        let simple_user = SimpleUser::new();
+        let partial_user = PartialUser::new();
+        let query = db.select_with(partial_user).from(users);
 
-        assert_eq!(
-            "select id, name from users",
-            db.select_with(simple_user).from(users).sql()
-        )
+        assert_eq!("select id, name from users", query.sql());
+        let partial_users: Vec<PartialUser> = query.all().await?;
+        assert_eq!(partial_users.len(), 0);
+        Ok(())
     }
 
     #[tokio::test]

@@ -162,3 +162,44 @@ async fn main() -> Result<(), RizzleError> {
     Ok(())
 }
 ```
+
+# Selecting rows
+
+```rust
+use rizzle::{Database, Table, sqlite, eq};
+
+#[derive(Table, Clone, Copy)]
+#[rizzle(table = "comments")]
+struct Comments {
+    #[rizzle(primary_key)]
+    id: sqlite::Integer,
+    #[rizzle(not_null)]
+    body: sqlite::Text,
+}
+
+#[derive(Row)]
+struct Comment {
+    id: i64,
+    body: String,
+}
+
+// partial selects
+#[derive(New, Select)]
+struct PartialComment {
+  body: String
+}
+
+#[tokio::main]
+async fn main() -> Result<(), RizzleError> {
+    let db = db().await;
+    let comments = Comments::new();
+    // don't forget to sync!
+    let rows: Vec<Comment> = db.select().from(comments).all().await;
+
+    let partial_comment = PartialComment::new();
+
+    let partial_rows: Vec<CommentBody> = db.select_with(partial_comment).from(comments).all().await;
+
+    Ok(())
+}
+```
