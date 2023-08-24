@@ -172,7 +172,7 @@ pub mod sqlite {
         SqlitePoolOptions as PoolOptions, SqliteQueryResult as QueryResult, SqliteRow,
         SqliteSynchronous as Synchronous,
     };
-    use sqlx::{QueryBuilder, Sqlite as Driver, SqlitePool as Pool, Type};
+    use sqlx::{Execute, QueryBuilder, Sqlite as Driver, SqlitePool as Pool, Type};
     pub type Integer = &'static str;
     pub type Text = &'static str;
     pub type Blob = &'static str;
@@ -190,7 +190,7 @@ pub mod sqlite {
         Text,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum DataValue {
         Blob(Vec<u8>),
         Integer(i64),
@@ -480,6 +480,49 @@ pub mod sqlite {
         value: DataValue,
     }
 
+    pub struct PreparedAs<'a, T>
+    where
+        T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
+    {
+        pool: Pool,
+        prepared: sqlx::query::QueryAs<'a, Driver, T, sqlx::sqlite::SqliteArguments<'a>>,
+    }
+
+    impl<'a, T> PreparedAs<'a, T>
+    where
+        T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
+    {
+        pub async fn rows_affected(self) -> Result<Vec<T>, RizzleError> {
+            let result = self.prepared.fetch_all(&self.pool).await?;
+            Ok(result)
+        }
+
+        pub async fn all(self) -> Result<Vec<T>, RizzleError>
+        where
+            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
+        {
+            let result = self.prepared.fetch_all(&self.pool).await?;
+            Ok(result)
+        }
+    }
+
+    pub struct Prepared<'a> {
+        pool: Pool,
+        prepared: sqlx::query::Query<'a, Driver, sqlx::sqlite::SqliteArguments<'a>>,
+    }
+
+    impl<'a> Prepared<'a> {
+        pub async fn rows_affected(self) -> Result<u64, RizzleError> {
+            let result = self.prepared.execute(&self.pool).await?.rows_affected();
+            Ok(result)
+        }
+
+        pub async fn last_insert_rowid(self) -> Result<i64, RizzleError> {
+            let result = self.prepared.execute(&self.pool).await?.last_insert_rowid();
+            Ok(result)
+        }
+    }
+
     pub struct Query {
         pool: Pool,
         sql: String,
@@ -592,6 +635,21 @@ pub mod sqlite {
             Ok(result)
         }
 
+        fn build<'a>(
+            &'a self,
+        ) -> sqlx::query::Query<'a, Driver, sqlx::sqlite::SqliteArguments<'a>> {
+            let mut query = sqlx::query::<Driver>(&self.sql);
+            for value in &self.values {
+                query = match value {
+                    DataValue::Blob(b) => query.bind(b),
+                    DataValue::Integer(integer) => query.bind(integer),
+                    DataValue::Real(real) => query.bind(real),
+                    DataValue::Text(text) => query.bind(text),
+                };
+            }
+            query
+        }
+
         fn build_as<'a, T>(
             &'a self,
         ) -> sqlx::query::QueryAs<Driver, T, sqlx::sqlite::SqliteArguments<'a>>
@@ -608,6 +666,21 @@ pub mod sqlite {
                 };
             }
             query
+        }
+
+        pub fn prepare_as<T>(&self) -> PreparedAs<T>
+        where
+            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
+        {
+            let pool = self.pool.clone();
+            let prepared = self.build_as::<T>();
+            PreparedAs { pool, prepared }
+        }
+
+        pub fn prepare(&self) -> Prepared {
+            let pool = self.pool.clone();
+            let prepared = self.build();
+            Prepared { pool, prepared }
         }
 
         pub async fn rows_affected(&self) -> Result<u64, RizzleError> {
@@ -645,7 +718,7 @@ pub mod sqlite {
             self
         }
 
-        fn delete(mut self, table_name: String) -> Self {
+        pub fn delete(mut self, table_name: String) -> Self {
             self.push(format!("delete from {}", table_name));
             self
         }
@@ -1309,6 +1382,24 @@ mod tests {
         assert_eq!(deleted_comment.id, 1);
         let comment_rows: Vec<Comment> = db.select().from(comments).all().await?;
         assert_eq!(comment_rows.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepare_works() -> Result<(), RizzleError> {
+        let db = db().await;
+        let comments = Comments::new();
+        let _ = sync!(db, comments).await?;
+        let insert = db.insert(comments).values(Comment {
+            id: 1,
+            body: "".to_owned(),
+        });
+        let prepared_insert = insert.prepare();
+        let rows_affected = prepared_insert.rows_affected().await?;
+        assert_eq!(1, rows_affected);
+        let query = db.select().from(comments);
+        let prepared = query.prepare_as::<Comment>();
+        let rows = prepared.all().await?;
         Ok(())
     }
 }
