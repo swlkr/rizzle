@@ -79,7 +79,7 @@ async fn main() -> Result<(), RizzleError> {
             id: 1,
             body: "".to_owned(),
         })
-        .last_insert_rowid()
+        .returning()
         .await?;
 
     let updated_post = db
