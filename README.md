@@ -28,42 +28,42 @@ async fn main() -> Result<(), RizzleError> {
 }
 ```
 
-# Auto migrations
+# Declare your schema
 
 ```rust
-use rizzle::{Database, Table, sync, sqlite::{Text, Integer}};
+use rizzle::{Database, Table, sync, sqlite::{Text, Integer}, RizzleError};
 
-#[derive(Table)]
+#[derive(Table, Clone, Copy)]
 #[rizzle(table = "posts")]
 struct Posts {
   #[rizzle(primary_key)]
   id: Integer,
   #[rizzle(not_null)]
   body: Text
+}
+
+#[derive(Table, Clone, Copy)]
+#[rizzle(table = "comments")]
+struct Comments {
+    #[rizzle(primary_key)]
+    id: Integer,
+    #[rizzle(not_null)]
+    body: Text,
+    #[rizzle(references = "posts(id)")]
+    post_id: Integer,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
   let db = Database::connect("sqlite://:memory:").await?;
-  let _ = sync!(db, posts).await;
+  let _ = sync!(db, posts, comments).await?;
   Ok(())
 }
 ```
 
-# Inserting rows
+# Inserting, updating, and deleting rows
 
 ```rust
-use rizzle::{Database, Table, sqlite::{Text, Integer}};
-
-#[derive(Table)]
-#[rizzle(table = "posts")]
-struct Posts {
-  #[rizzle(primary_key)]
-  id: Integer,
-  #[rizzle(not_null)]
-  body: Text
-}
-
 #[derive(Row)]
 struct Post {
   id: i64,
@@ -72,118 +72,54 @@ struct Post {
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-  let db = Database::connect("sqlite://:memory:").await?;
-  let _ = sync!(db, comments).await?;
-  let post: Post = db.insert(posts).values(Post { id: 1, body: "".to_owned() }).returning().await?;
-  Ok(())
-}
-```
-
-# Updating rows
-
-```rust
-use rizzle::{Database, Table, sqlite, eq};
-
-#[derive(Table, Clone, Copy)]
-#[rizzle(table = "comments")]
-struct Comments {
-    #[rizzle(primary_key)]
-    id: sqlite::Integer,
-    #[rizzle(not_null)]
-    body: sqlite::Text,
-}
-
-#[derive(Row)]
-struct Comment {
-    id: i64,
-    body: String,
-}
-
-#[tokio::main]
-async fn main() -> Result<(), RizzleError> {
     let db = Database::connect("sqlite://:memory:").await?;
-    let comments = Comments::new();
+    let inserted_post: Post = db
+        .insert(posts)
+        .values(Post {
+            id: 1,
+            body: "".to_owned(),
+        })
+        .last_insert_rowid()
+        .await?;
 
-    let _ = sync!(db, comments).await?;
-
-    let inserted_comment: Comment = db
-      .insert(comments)
-      .values(Comment {
-          id: 1,
-          body: "".to_owned(),
-      })
-      .returning()
-      .await?;
-
-    let _ = db
-        .update(comments)
-        .set(Comment {
-            body: "comment".to_owned(),
-            ..inserted_comment
+    let updated_post = db
+        .update(posts)
+        .set(Post {
+            body: "post".to_owned(),
+            ..inserted_post
         })
         .rows_affected()
         .await?;
 
+    let deleted_post = db.delete(posts).where(eq(posts.id, 1)).returning().await?;
+
     Ok(())
 }
 ```
 
-# Deleting rows
+# Selecting rows with *
 
 ```rust
-use rizzle::{Database, Table, sqlite, eq};
-
-#[derive(Table, Clone, Copy)]
-#[rizzle(table = "comments")]
-struct Comments {
-    #[rizzle(primary_key)]
-    id: sqlite::Integer,
-    #[rizzle(not_null)]
-    body: sqlite::Text,
-}
-
 #[derive(Row)]
 struct Comment {
     id: i64,
     body: String,
+    post_id: i64
 }
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let db = Database::connect("sqlite://:memory:").await?;
-    let comments = Comments::new();
-    // don't forget to sync!
-    let comment: Comment = db
-        .delete(comments)
-        .where(eq(comments.id, 1))
-        .returning()
-        .await?;
+    // select * from comments
+    let rows: Vec<Comment> = db.select().from(comments).all().await;
 
     Ok(())
 }
 ```
 
-# Selecting rows
+# Selecting specific columns
 
 ```rust
-use rizzle::{Database, Table, sqlite, eq};
-
-#[derive(Table, Clone, Copy)]
-#[rizzle(table = "comments")]
-struct Comments {
-    #[rizzle(primary_key)]
-    id: sqlite::Integer,
-    #[rizzle(not_null)]
-    body: sqlite::Text,
-}
-
-#[derive(Row)]
-struct Comment {
-    id: i64,
-    body: String,
-}
-
-// partial selects
 #[derive(New, Select)]
 struct PartialComment {
   body: String
@@ -192,55 +128,49 @@ struct PartialComment {
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let db = Database::connect("sqlite://:memory:").await?;
-    let comments = Comments::new();
-    // don't forget to sync!
-    let rows: Vec<Comment> = db.select().from(comments).all().await;
     let partial_comment = PartialComment::new();
+    // select body from comments
     let partial_rows: Vec<PartialComment> = db.select_with(partial_comment).from(comments).all().await;
 
     Ok(())
 }
 ```
 
+
 # Joins
 
 ```rust
-use rizzle::{Database, Table, sqlite, on};
-
-#[derive(Table, Clone, Copy)]
-#[rizzle(table = "comments")]
-struct Comments {
-    #[rizzle(primary_key)]
-    id: sqlite::Integer,
-    #[rizzle(not_null)]
-    body: sqlite::Text,
-    #[rizzle(not_null, references = "posts(id)")]
-    post_id: sqlite::Integer
-}
-
-#[derive(Table, Clone, Copy)]
-#[rizzle(table = "posts")]
-struct Posts {
-    #[rizzle(primary_key)]
-    id: sqlite::Integer,
-    #[rizzle(not_null)]
-    body: sqlite::Text,
-}
-
-#[derive(Row)]
-struct Comment {
-    id: i64,
-    body: String,
-    post_id: i64,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = Database::connect("sqlite://:memory:").await?;
     let posts = Posts::new();
     let comments = Comments::new();
-    let _ = sync!(db, posts, comments).await?;
-    let rows: Vec<Comment> = db.select().from(comments).inner_join(posts, on(posts.id, comments.post_id)).all().await;
+
+    let db = Database::connect("sqlite://:memory:").await?;
+
+    let rows: Vec<Comment> = db
+        .select()
+        .from(comments)
+        .inner_join(posts, on(posts.id, comments.post_id))
+        .all()
+        .await;
+
+    Ok(())
+}
+```
+
+# Prepared statements
+
+```rust
+#[tokio::main]
+async fn main() -> Result<(), RizzleError> {
+    let comments = Comments::new();
+    let db = Database::connect("sqlite://:memory:").await?;
+
+    let query = db.select().from(comments);
+
+    let prepared = query.prepare_as::<Comment>();
+
+    let rows = prepared.all().await?;
 
     Ok(())
 }
