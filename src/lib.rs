@@ -811,16 +811,14 @@ fn on(left: &str, right: &str) -> String {
 macro_rules! asc {
     ($($columns:tt)*) => {{
         let cols: Vec<&str> = vec![$($columns)*];
-        let cols = cols.join(", ");
-        format!("{} asc", cols)
+        cols.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
     }}
 }
 
 macro_rules! desc {
     ($($columns:tt)*) => {{
         let cols: Vec<&str> = vec![$($columns)*];
-        let cols = cols.join(", ");
-        format!("{} desc", cols)
+        cols.iter().map(|c| format!("{} desc", c)).collect::<Vec<_>>().join(", ")
     }}
 }
 
@@ -1223,7 +1221,7 @@ mod tests {
     #[test]
     fn asc_works() {
         let users = Users::new();
-        assert_eq!("users.id, users.name asc", asc!(users.id, users.name))
+        assert_eq!("users.id, users.name", asc!(users.id, users.name))
     }
 
     #[tokio::test]
@@ -1231,7 +1229,7 @@ mod tests {
         let db = db().await;
         let users = Users::new();
         assert_eq!(
-            "select * from users order by users.id, users.name desc",
+            "select * from users order by users.id desc, users.name desc",
             db.select()
                 .from(users)
                 .order_by(desc!(users.id, users.name))
