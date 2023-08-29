@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens};
 use syn::{
     parse::Parse, parse_macro_input, Data, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Field,
-    Ident, Lit, LitStr, PathSegment, Result, Type, TypePath,
+    GenericArgument, Ident, Lit, LitStr, Path, PathArguments, PathSegment, Result, Type, TypePath,
 };
 
 #[proc_macro_derive(Table, attributes(rizzle))]
@@ -23,6 +23,9 @@ struct RizzleAttr {
     default_value: Option<LitStr>,
     columns: Option<LitStr>,
     references: Option<LitStr>,
+    many: Option<LitStr>,
+    from: Option<LitStr>,
+    to: Option<LitStr>,
 }
 
 impl Parse for RizzleAttr {
@@ -49,6 +52,15 @@ impl Parse for RizzleAttr {
                                 }
                                 "references" => {
                                     rizzle_attr.references = Some(lit_str.clone());
+                                }
+                                "many" => {
+                                    rizzle_attr.many = Some(lit_str.clone());
+                                }
+                                "from" => {
+                                    rizzle_attr.from = Some(lit_str.clone());
+                                }
+                                "to" => {
+                                    rizzle_attr.to = Some(lit_str.clone());
                                 }
                                 _ => unimplemented!(),
                             }
@@ -85,6 +97,7 @@ struct RizzleField {
     field: Field,
     attrs: Vec<RizzleAttr>,
     type_string: String,
+    vec_type: Option<Type>,
 }
 
 fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
@@ -117,6 +130,7 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                         .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
                         .collect::<Vec<_>>(),
                     type_string: string_type_from_field(&field),
+                    vec_type: generic_from_vec(&field.ty),
                 }
             })
             .collect::<Vec<_>>(),
@@ -535,4 +549,123 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
             }
         }
     })
+}
+
+#[proc_macro_derive(Pull, attributes(rizzle))]
+pub fn pull(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match pull_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn pull_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
+    let struct_fields = rizzle_fields(&input.data);
+    let json_object = struct_fields
+        .iter()
+        .map(|field| {
+            let ident = &field.ident;
+            let attr = field.attrs.first();
+            match attr {
+                Some(RizzleAttr { many, from, to , ..}) => {
+                    let many= match many.as_ref() {
+                        Some(lit_str) => lit_str.value(),
+                        None => ident.to_string(),
+                    };
+                    let from = from.as_ref().expect("A pull struct requires a #[rizzle(from =\"table_name.foreign_key_column\")] attribute").token();
+                    let to = to.as_ref().expect("A pull struct requires a #[rizzle(to = \"foreign_table_name.primary_key\")] attribute").token();
+                    let type_generic = field.vec_type.as_ref().expect("Pulls structs only support Vec<T> of other structs which implement Pull");
+                    let vec_ident= last_segment_from_type(&type_generic).unwrap();
+                    quote! {
+                        format!(
+                            "'{}', (select json_group_array({}) from {} where {} = {})",
+                            #ident,
+                            #vec_ident::default().json_object_sql(),
+                            #many,
+                            #from,
+                            #to
+                        )
+                    }
+                }
+                _ => quote! { format!("'{}', {}", #ident, #ident) },
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(quote! {
+        impl FromRow<'_, sqlite::SqliteRow> for #struct_name {
+            fn from_row(row: &sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+                let json = &row.try_get::<String, &str>("__pull__")?;
+                let row = serde_json::from_str(json).map_err(|e| sqlx::Error::ColumnNotFound(format!("{}", e)))?;
+                Ok(row)
+            }
+        }
+
+        impl Pull for #struct_name {
+            fn json_object_sql(&self) -> String {
+                format!("json_object({})", vec![#(#json_object,)*].join(", "))
+            }
+        }
+    })
+}
+
+fn rizzle_fields(data: &Data) -> Vec<RizzleField> {
+    match data {
+        syn::Data::Struct(ref data) => data
+            .fields
+            .iter()
+            .map(|field| {
+                let ident = field
+                    .ident
+                    .as_ref()
+                    .expect("Struct fields should have names")
+                    .to_string();
+                RizzleField {
+                    ident: ident.to_owned(),
+                    field: field.clone(),
+                    attrs: field
+                        .attrs
+                        .iter()
+                        .filter_map(|attr| attr.parse_args::<RizzleAttr>().ok())
+                        .collect::<Vec<_>>(),
+                    type_string: string_type_from_field(&field),
+                    vec_type: generic_from_vec(&field.ty),
+                }
+            })
+            .collect::<Vec<_>>(),
+        _ => unimplemented!(),
+    }
+}
+
+fn is_path_generic(path: &Path, container: &str) -> bool {
+    path.segments.len() == 1 && path.segments.last().unwrap().ident == container
+}
+
+fn is_path_vec(path: &Path) -> bool {
+    is_path_generic(path, "Vec")
+}
+
+fn generic_from_vec(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Path(TypePath { qself, path }) if qself.is_none() && is_path_vec(&path) => {
+            let path_arguments = &path.segments.last().unwrap().arguments;
+            let generic_arg = match path_arguments {
+                PathArguments::AngleBracketed(params) => params.args.last().unwrap(),
+                _ => return None,
+            };
+            match generic_arg {
+                GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    }
+}
+
+fn last_segment_from_type(ty: &Type) -> Option<Ident> {
+    match ty {
+        Type::Path(TypePath { path, .. }) => Some(path.segments.last()?.ident.clone()),
+        _ => None,
+    }
 }

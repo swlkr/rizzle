@@ -167,12 +167,15 @@ pub trait Table {
 
 pub mod sqlite {
     use super::*;
-    pub use sqlx::sqlite::{
-        SqliteConnectOptions as ConnectOptions, SqliteJournalMode as JournalMode,
-        SqlitePoolOptions as PoolOptions, SqliteQueryResult as QueryResult, SqliteRow,
-        SqliteSynchronous as Synchronous,
+    pub use sqlx::{
+        sqlite::{
+            SqliteConnectOptions as ConnectOptions, SqliteJournalMode as JournalMode,
+            SqlitePoolOptions as PoolOptions, SqliteQueryResult as QueryResult, SqliteRow,
+            SqliteSynchronous as Synchronous,
+        },
+        Sqlite as Driver,
     };
-    use sqlx::{Execute, QueryBuilder, Sqlite as Driver, SqlitePool as Pool, Type};
+    use sqlx::{Execute, QueryBuilder, SqlitePool as Pool, Type};
     pub type Integer = &'static str;
     pub type Text = &'static str;
     pub type Blob = &'static str;
@@ -309,7 +312,7 @@ pub mod sqlite {
 
     #[derive(Clone, Debug)]
     pub struct Database {
-        pool: Pool,
+        pub pool: Pool,
     }
 
     impl Database {
@@ -473,6 +476,10 @@ pub mod sqlite {
         pub fn delete(&self, delete: impl Table) -> Query {
             Query::new(self.pool.clone()).delete(delete.name())
         }
+
+        pub fn pull(&self, st: impl Pull) -> Query {
+            Query::new(self.pool.clone()).pull(st)
+        }
     }
 
     pub struct Bind {
@@ -605,7 +612,7 @@ pub mod sqlite {
         }
 
         pub fn sql(&self) -> String {
-            self.sql.as_str().trim_end().to_owned()
+            self.sql.trim_end().to_owned()
         }
 
         pub fn insert(mut self, table_name: String) -> Self {
@@ -700,7 +707,7 @@ pub mod sqlite {
 
         pub async fn returning<T>(mut self) -> Result<T, RizzleError>
         where
-            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin + std::fmt::Debug,
+            T: for<'r> FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
         {
             self.push("returning *");
             let rows = self.build_as::<T>().fetch_all(&self.pool).await?;
@@ -720,6 +727,11 @@ pub mod sqlite {
 
         pub fn delete(mut self, table_name: String) -> Self {
             self.push(format!("delete from {}", table_name));
+            self
+        }
+
+        fn pull(mut self, st: impl Pull) -> Query {
+            self.push(format!("select {} as '__pull__'", st.json_object_sql()));
             self
         }
     }
@@ -751,7 +763,7 @@ impl From<sqlx::Error> for RizzleError {
             sqlx::Error::RowNotFound => RizzleError::RowNotFound,
             sqlx::Error::TypeNotFound { type_name } => todo!(),
             sqlx::Error::ColumnIndexOutOfBounds { index, len } => todo!(),
-            sqlx::Error::ColumnNotFound(_) => todo!(),
+            sqlx::Error::ColumnNotFound(e) => RizzleError::Database(e),
             sqlx::Error::ColumnDecode { index, source } => todo!(),
             sqlx::Error::Decode(_) => todo!(),
             sqlx::Error::AnyDriverError(_) => todo!(),
@@ -776,6 +788,10 @@ pub trait New {
 
 pub trait Select {
     fn select_sql(&self) -> String;
+}
+
+pub trait Pull {
+    fn json_object_sql(&self) -> String;
 }
 
 pub trait Insert {
@@ -905,7 +921,9 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
 mod tests {
     use super::*;
     use crate::sqlite::{eq, DataValue, Database, DatabaseOptions, Text};
-    use macros::{Insert, New, Row, Select, Table, Update};
+    use macros::{Insert, New, Pull, Row, Select, Table, Update};
+    use serde::de::DeserializeOwned;
+    use serde::Deserialize;
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1095,9 +1113,6 @@ mod tests {
 
         #[rizzle(columns = "name")]
         name_index: sqlite::UniqueIndex,
-
-        #[rizzle(references = "posts(user_id)")]
-        posts: sqlite::Many,
     }
 
     #[derive(Row, Default, Debug)]
@@ -1201,6 +1216,7 @@ mod tests {
             .inner_join(users, on(users.id, posts.user_id))
             .all()
             .await?;
+        assert_eq!(1, rows.first().unwrap().user_id);
         Ok(())
     }
 
@@ -1335,8 +1351,15 @@ mod tests {
     struct Comments {
         #[rizzle(primary_key)]
         id: sqlite::Integer,
+
         #[rizzle(not_null)]
         body: sqlite::Text,
+
+        #[rizzle(references = "users(id)")]
+        author_id: sqlite::Integer,
+
+        #[rizzle(references = "posts(id)")]
+        post_id: sqlite::Integer,
     }
 
     #[derive(Row, Debug)]
@@ -1348,8 +1371,10 @@ mod tests {
     #[tokio::test]
     async fn derive_row_for_basic_crud() -> Result<(), RizzleError> {
         let db = db().await;
+        let users = Users::new();
+        let posts = Posts::new();
         let comments = Comments::new();
-        let _ = sync!(db, comments).await?;
+        let _ = sync!(db, users, posts, comments).await?;
         let inserted_comment: Comment = db
             .insert(comments)
             .values(Comment {
@@ -1388,8 +1413,10 @@ mod tests {
     #[tokio::test]
     async fn prepare_works() -> Result<(), RizzleError> {
         let db = db().await;
+        let users = Users::new();
+        let posts = Posts::new();
         let comments = Comments::new();
-        let _ = sync!(db, comments).await?;
+        let _ = sync!(db, users, posts, comments).await?;
         let insert = db.insert(comments).values(Comment {
             id: 1,
             body: "".to_owned(),
@@ -1400,6 +1427,125 @@ mod tests {
         let query = db.select().from(comments);
         let prepared = query.prepare_as::<Comment>();
         let rows = prepared.all().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pull_sql_works() -> Result<(), RizzleError> {
+        #[derive(Pull, Deserialize, Default)]
+        struct PullUser {
+            id: i64,
+            body: String,
+        }
+        let users = Users::new();
+        let db = Database::connect("sqlite://:memory:").await?;
+        let sql = db.pull(PullUser::default()).from(users).sql();
+        assert_eq!(
+            "select json_object('id', id, 'body', body) as '__pull__' from users",
+            sql
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pull_top_level_works() -> Result<(), RizzleError> {
+        #[derive(Pull, Deserialize, Default)]
+        struct PullUser {
+            id: i64,
+            name: String,
+        }
+        let users = Users::new();
+        let db = Database::connect("sqlite://:memory:").await?;
+        let _ = sync!(db, users).await?;
+        let _ = db
+            .insert(users)
+            .values(User {
+                id: 1,
+                name: "name".to_string(),
+                created_at: 0.0,
+                updated_at: 0.0,
+            })
+            .rows_affected()
+            .await?;
+        let rows: Vec<PullUser> = db.pull(PullUser::default()).from(users).all().await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.first().unwrap().id, 1);
+        assert_eq!(rows.first().unwrap().name, "name");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pull_one_level_vec_sql_works() -> Result<(), RizzleError> {
+        #[derive(Pull, Deserialize, Default)]
+        struct PullPost {
+            id: i64,
+            body: String,
+        }
+
+        #[derive(Pull, Deserialize, Default)]
+        struct PullUser {
+            id: i64,
+            name: String,
+            #[rizzle(from = "posts.user_id", to = "users.id")]
+            posts: Vec<PullPost>,
+        }
+
+        let users = Users::new();
+        let posts = Posts::new();
+        let db = Database::connect("sqlite://:memory:").await?;
+        let _sync = sync!(db, users, posts).await?;
+        let user: User = db
+            .insert(users)
+            .values(User {
+                id: 1,
+                name: "user1".to_owned(),
+                ..Default::default()
+            })
+            .returning()
+            .await?;
+
+        let post: Post = db
+            .insert(posts)
+            .values(Post {
+                id: 1,
+                body: "body1".to_owned(),
+                user_id: 1,
+                ..Default::default()
+            })
+            .returning()
+            .await?;
+
+        let post1: Post = db
+            .insert(posts)
+            .values(Post {
+                id: 2,
+                body: "body2".to_owned(),
+                user_id: 1,
+                ..Default::default()
+            })
+            .returning()
+            .await?;
+
+        let query = db.pull(PullUser::default()).from(users);
+        let sql = query.sql();
+        assert_eq!(
+            r#"select json_object('id', id, 'name', name, 'posts', (select json_group_array(json_object('id', id, 'body', body)) from posts where posts.user_id = users.id)) as '__pull__' from users"#,
+            sql
+        );
+
+        let rows: Vec<PullUser> = query.all().await?;
+        let row = rows.first().unwrap();
+        let posts = &row.posts;
+        let pull_post1 = row.posts.first().unwrap();
+        let pull_post2 = row.posts.iter().nth(1).unwrap();
+        assert_eq!(row.id, user.id);
+        assert_eq!(row.name, user.name);
+        assert_eq!(posts.len(), 2);
+        assert_eq!(pull_post1.id, post.id);
+        assert_eq!(pull_post2.id, post1.id);
+        assert_eq!(pull_post1.body, post.body);
+        assert_eq!(pull_post2.body, post1.body);
+
         Ok(())
     }
 }
