@@ -38,6 +38,7 @@ use rizzle::{Database, Table, sync, sqlite::{Text, Integer}, RizzleError};
 struct Posts {
   #[rizzle(primary_key)]
   id: Integer,
+
   #[rizzle(not_null)]
   body: Text
 }
@@ -47,8 +48,10 @@ struct Posts {
 struct Comments {
     #[rizzle(primary_key)]
     id: Integer,
+
     #[rizzle(not_null)]
     body: Text,
+
     #[rizzle(references = "posts(id)")]
     post_id: Integer,
 }
@@ -73,6 +76,9 @@ struct Post {
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let db = Database::connect("sqlite://:memory:").await?;
+    let posts = Posts::new();
+
+    // insert into posts (id, body) values (?, ?) returning *
     let inserted_post: Post = db
         .insert(posts)
         .values(Post {
@@ -82,15 +88,18 @@ async fn main() -> Result<(), RizzleError> {
         .returning()
         .await?;
 
-    let updated_post = db
+    // update posts set body = ?, id = ? where id = ?
+    let rows_affected = db
         .update(posts)
         .set(Post {
             body: "post".to_owned(),
             ..inserted_post
         })
+        .where(eq(posts.id, 1))
         .rows_affected()
         .await?;
 
+    // delete from posts where id = ? returning *
     let deleted_post = db.delete(posts).where(eq(posts.id, 1)).returning().await?;
 
     Ok(())
@@ -110,6 +119,8 @@ struct Comment {
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let db = Database::connect("sqlite://:memory:").await?;
+    let comments = Comments::new();
+
     // select * from comments
     let rows: Vec<Comment> = db.select().from(comments).all().await;
 
@@ -128,14 +139,15 @@ struct PartialComment {
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let db = Database::connect("sqlite://:memory:").await?;
+    let comments = Comments::new();
     let partial_comment = PartialComment::new();
+
     // select body from comments
     let partial_rows: Vec<PartialComment> = db.select_with(partial_comment).from(comments).all().await;
 
     Ok(())
 }
 ```
-
 
 # Joins
 
@@ -147,6 +159,7 @@ async fn main() -> Result<(), RizzleError> {
 
     let db = Database::connect("sqlite://:memory:").await?;
 
+    // select * from comments inner join posts on posts.id = comments.post_id
     let rows: Vec<Comment> = db
         .select()
         .from(comments)
@@ -166,10 +179,13 @@ async fn main() -> Result<(), RizzleError> {
     let comments = Comments::new();
     let db = Database::connect("sqlite://:memory:").await?;
 
+    // select * from comments
     let query = db.select().from(comments);
 
+    // prepare the query store it in a once lock or something
     let prepared = query.prepare_as::<Comment>();
 
+    // execute the prepared query later
     let rows = prepared.all().await?;
 
     Ok(())
