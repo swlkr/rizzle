@@ -1,5 +1,5 @@
 #![allow(unused)]
-use sqlite::DataValue;
+pub use sqlite::{DataValue, Database, DatabaseOptions};
 use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
 pub use sqlx::{FromRow, Row};
 use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
@@ -915,6 +915,10 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
         .join(";")
 }
 
+pub async fn rizzle(db_options: DatabaseOptions) -> Result<Database, RizzleError> {
+    Database::new(db_options).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,7 +930,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     async fn db() -> Database {
-        Database::connect("sqlite://:memory:").await.unwrap()
+        let db_options = DatabaseOptions::new("sqlite://:memory:");
+        rizzle(db_options).await.unwrap()
     }
 
     #[tokio::test]
