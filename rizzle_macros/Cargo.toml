@@ -2,6 +2,7 @@
 name = "rizzle_macros"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/swlkr/rizzle"
 repository = "https://github.com/swlkr/rizzle"
