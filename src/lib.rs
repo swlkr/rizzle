@@ -154,6 +154,12 @@ pub struct Reference {
     r#match: String,
 }
 
+pub trait RizzleSchema {
+    fn new() -> Self;
+    fn tables<'a>(&'a self) -> Vec<&'a dyn Table>;
+    fn sql(&self) -> String;
+}
+
 pub trait Table {
     fn new() -> Self
     where
@@ -822,25 +828,6 @@ macro_rules! desc {
     }}
 }
 
-/// sync! macro helper for db migrations
-///
-/// Example:
-///
-/// let db = Database::new("sqlite://:memory:").await;
-/// #[derive(Table)]
-/// #[rizzle(table = "posts")]
-/// struct Posts {
-///   #[rizzle(primary_key)]
-///   id: sqlite::Integer,
-/// }
-/// let posts = Posts::new();
-/// if let Ok(_) = sync!(db, posts).await {}
-macro_rules! sync {
-    ($db:ident $(,$tables:tt)*) => {{
-        $db.sync(vec![$(&$tables,)*])
-    }};
-}
-
 fn drop_indexes_sql(tables: Vec<&dyn Table>, index_names: Vec<String>) -> String {
     let index_arr = tables
         .into_iter()
@@ -915,189 +902,24 @@ fn drop_columns_sql(db_columns: Vec<Column>, new_columns: Vec<Column>) -> String
         .join(";")
 }
 
-pub async fn rizzle(db_options: DatabaseOptions) -> Result<Database, RizzleError> {
-    Database::new(db_options).await
+pub async fn rizzle(
+    options: DatabaseOptions,
+    schema: impl RizzleSchema,
+) -> Result<Database, RizzleError> {
+    let db = Database::new(options).await?;
+    let _ = db.sync(schema.tables()).await?;
+    Ok(db)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sqlite::{eq, DataValue, Database, DatabaseOptions, Text};
-    use macros::{Insert, New, Pull, Row, Select, Table, Update};
+    use macros::{Insert, New, Pull, RizzleSchema, Row, Select, Table, Update};
     use serde::de::DeserializeOwned;
     use serde::Deserialize;
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    async fn db() -> Database {
-        let db_options = DatabaseOptions::new("sqlite://:memory:");
-        rizzle(db_options).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn sync_new_tables_works() {
-        let db = db().await;
-        let a = A::new();
-        assert_eq!(0, db.table_names().await.len());
-        db.sync(vec![&a]).await;
-        assert_eq!(1, db.table_names().await.len())
-    }
-
-    #[tokio::test]
-    async fn sync_new_tables_is_idempotent_works() {
-        let db = db().await;
-        let a = A::new();
-        assert_eq!(0, db.table_names().await.len());
-        db.sync(vec![&a]).await;
-        assert_eq!(1, db.table_names().await.len());
-        db.sync(vec![&a]).await;
-        assert_eq!(1, db.table_names().await.len())
-    }
-
-    #[tokio::test]
-    async fn sync_with_dropped_tables_works() {
-        let db = db().await;
-        let a = A::new();
-        let b = B::new();
-        db.sync(vec![&a, &b]).await;
-        assert_eq!(2, db.table_names().await.len());
-        db.sync(vec![&b]).await;
-        assert_eq!(1, db.table_names().await.len());
-    }
-
-    #[derive(Table)]
-    #[rizzle(table = "table_a")]
-    struct A {
-        a: sqlite::Text,
-    }
-
-    #[derive(Table)]
-    #[rizzle(table = "table_b")]
-    struct B {
-        #[rizzle(primary_key)]
-        id: sqlite::Integer,
-    }
-
-    #[derive(Table)]
-    #[rizzle(table = "table_a")]
-    struct A2 {
-        a: sqlite::Text,
-        #[rizzle(not_null)]
-        b: sqlite::Text,
-    }
-
-    #[tokio::test]
-    async fn sync_with_added_columns_works() -> Result<(), RizzleError> {
-        let a = A::new();
-        let db = db().await;
-        let _ = sync!(db, a).await?;
-        let table_names = db.table_names().await;
-        assert_eq!(1, table_names.len());
-        let a2 = A2::new();
-        let _ = sync!(db, a2).await?;
-        let table_names = db.table_names().await;
-        assert_eq!(1, table_names.len());
-        let columns = db.columns().await;
-        assert_eq!(2, columns.len());
-        Ok(())
-    }
-
-    #[test]
-    fn rizzle_table_name_works() {
-        let a = A::new();
-        assert_eq!("create table table_a (a text)", a.create_sql())
-    }
-
-    #[derive(Table)]
-    #[rizzle(table = "index_table")]
-    struct IndexTable {
-        #[rizzle(primary_key)]
-        id: sqlite::Integer,
-        #[rizzle(not_null)]
-        name: sqlite::Text,
-        #[rizzle(columns = "name")]
-        name_index: sqlite::UniqueIndex,
-    }
-
-    #[tokio::test]
-    async fn drop_table_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        assert_eq!(0, db.table_names().await.len());
-
-        let a = A::new();
-        let _ = sync!(db, a).await?;
-        assert_eq!(1, db.table_names().await.len());
-
-        let _ = sync!(db).await?;
-        assert_eq!(0, db.table_names().await.len());
-
-        Ok(())
-    }
-
-    #[derive(Table)]
-    #[rizzle(table = "index_table")]
-    struct I {
-        #[rizzle(not_null)]
-        a: sqlite::Text,
-
-        #[rizzle(not_null)]
-        b: sqlite::Text,
-
-        #[rizzle(columns = "a,b")]
-        a_b_index: sqlite::UniqueIndex,
-    }
-
-    #[tokio::test]
-    async fn create_indexes_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        assert_eq!(0, db.index_names().await.len());
-
-        let it = IndexTable::new();
-        let _ = sync!(db, it).await?;
-        assert_eq!(
-            vec!["name_index".to_owned()],
-            db.index_names()
-                .await
-                .into_iter()
-                .map(|ind| ind.0)
-                .collect::<Vec<_>>()
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn drop_indexes_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        assert_eq!(0, db.index_names().await.len());
-
-        let it = IndexTable::new();
-        let _ = sync!(db, it).await?;
-
-        assert_eq!(1, db.index_names().await.len());
-
-        let _ = sync!(db).await?;
-        assert_eq!(0, db.index_names().await.len());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn drop_columns_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        assert_eq!(0, db.columns().await.len());
-
-        let a = A2::new();
-        sync!(db, a).await?;
-
-        assert_eq!(2, db.columns().await.len());
-
-        let a = A::new();
-        let _ = sync!(db, a).await?;
-        assert_eq!(1, db.columns().await.len());
-
-        Ok(())
-    }
 
     #[derive(Table, Clone, Copy)]
     #[rizzle(table = "users")]
@@ -1116,14 +938,6 @@ mod tests {
 
         #[rizzle(columns = "name")]
         name_index: sqlite::UniqueIndex,
-    }
-
-    #[derive(Row, Default, Debug)]
-    struct User {
-        id: i64,
-        name: String,
-        created_at: f64,
-        updated_at: f64,
     }
 
     #[derive(Table, Clone, Copy)]
@@ -1145,6 +959,37 @@ mod tests {
         user_id: sqlite::Integer,
     }
 
+    #[derive(Table, Clone, Copy)]
+    #[rizzle(table = "comments")]
+    struct Comments {
+        #[rizzle(primary_key)]
+        id: sqlite::Integer,
+
+        #[rizzle(not_null)]
+        body: sqlite::Text,
+
+        #[rizzle(references = "users(id)")]
+        author_id: sqlite::Integer,
+
+        #[rizzle(references = "posts(id)")]
+        post_id: sqlite::Integer,
+    }
+
+    #[derive(RizzleSchema, Clone, Copy)]
+    struct Schema {
+        users: Users,
+        posts: Posts,
+        comments: Comments,
+    }
+
+    #[derive(Row, Default, Debug)]
+    struct User {
+        id: i64,
+        name: String,
+        created_at: f64,
+        updated_at: f64,
+    }
+
     #[derive(Row, Default, Debug)]
     struct Post {
         id: i64,
@@ -1152,6 +997,252 @@ mod tests {
         created_at: f64,
         updated_at: f64,
         user_id: i64,
+    }
+
+    #[derive(Row, Debug)]
+    struct Comment {
+        id: i64,
+        body: String,
+    }
+
+    fn db_options() -> DatabaseOptions {
+        DatabaseOptions::new("sqlite://:memory:")
+    }
+
+    fn schema() -> Schema {
+        Schema::new()
+    }
+
+    async fn db() -> Database {
+        rizzle(db_options(), schema()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_new_tables_works() {
+        let db = db().await;
+        assert!(db
+            .table_names()
+            .await
+            .iter()
+            .map(|tn| &tn.0)
+            .any(|name| name == "users"));
+    }
+
+    #[tokio::test]
+    async fn sync_new_tables_is_idempotent_works() {
+        let db0 = db().await;
+        let tables_len0 = db0.table_names().await.len();
+        let db1 = db().await;
+        let tables_len1 = db0.table_names().await.len();
+        assert_eq!(tables_len0, tables_len1)
+    }
+
+    #[tokio::test]
+    async fn sync_with_dropped_tables_works() {
+        let db = db().await;
+        let u = Users::new();
+        let p = Posts::new();
+        db.sync(vec![&u, &p]).await;
+        assert_eq!(2, db.table_names().await.len());
+        db.sync(vec![&u]).await;
+        assert_eq!(1, db.table_names().await.len());
+    }
+
+    #[tokio::test]
+    async fn sync_with_added_columns_works() -> Result<(), RizzleError> {
+        #[derive(Table, Clone, Copy)]
+        #[rizzle(table = "table_a")]
+        struct A {
+            a: sqlite::Text,
+        }
+
+        #[derive(Table, Clone, Copy)]
+        #[rizzle(table = "table_b")]
+        struct B {
+            #[rizzle(primary_key)]
+            id: sqlite::Integer,
+        }
+
+        #[derive(Table, Clone, Copy)]
+        #[rizzle(table = "table_a")]
+        struct A2 {
+            a: sqlite::Text,
+            #[rizzle(not_null)]
+            b: sqlite::Text,
+        }
+
+        #[derive(RizzleSchema, Clone, Copy)]
+        struct Schema {
+            a: A,
+            b: B,
+        }
+
+        #[derive(RizzleSchema, Clone, Copy)]
+        struct NewSchema {
+            a: A2,
+            b: B,
+        }
+
+        let schema = Schema::new();
+        let new_schema = NewSchema::new();
+        let db0 = rizzle(db_options(), schema).await?;
+        let db1 = rizzle(db_options(), new_schema).await?;
+        assert_eq!(2, db0.columns().await.len());
+        assert_eq!(3, db1.columns().await.len());
+        Ok(())
+    }
+
+    #[test]
+    fn rizzle_table_name_works() {
+        let users = Users::new();
+        assert!(users.create_sql().contains("create table users"))
+    }
+
+    #[tokio::test]
+    async fn drop_table_works() -> Result<(), RizzleError> {
+        #[derive(Table)]
+        #[rizzle(table = "a")]
+        struct A {
+            id: sqlite::Blob,
+        }
+
+        #[derive(Table)]
+        #[rizzle(table = "b")]
+        struct B {
+            id: sqlite::Blob,
+        }
+
+        #[derive(RizzleSchema)]
+        struct Schema {
+            a: A,
+            b: B,
+        }
+
+        #[derive(RizzleSchema)]
+        struct NewSchema {
+            a: A,
+        }
+
+        let db0 = rizzle(db_options(), Schema::new()).await?;
+        let db1 = rizzle(db_options(), NewSchema::new()).await?;
+
+        assert_eq!(2, db0.table_names().await.len());
+        assert_eq!(1, db1.table_names().await.len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_indexes_works() -> Result<(), RizzleError> {
+        #[derive(Table)]
+        #[rizzle(table = "index_table")]
+        struct I {
+            #[rizzle(not_null)]
+            a: sqlite::Text,
+
+            #[rizzle(not_null)]
+            b: sqlite::Text,
+
+            #[rizzle(columns = "a,b")]
+            a_b_index: sqlite::UniqueIndex,
+        }
+
+        #[derive(RizzleSchema)]
+        struct Schema {
+            i: I,
+        }
+
+        let db0 = rizzle(db_options(), Schema::new()).await?;
+        assert_eq!(1, db0.index_names().await.len());
+
+        assert_eq!(
+            vec!["a_b_index".to_owned()],
+            db0.index_names()
+                .await
+                .into_iter()
+                .map(|ind| ind.0)
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drop_indexes_works() -> Result<(), RizzleError> {
+        #[derive(Table)]
+        #[rizzle(table = "index_table")]
+        struct I {
+            #[rizzle(not_null)]
+            a: sqlite::Text,
+
+            #[rizzle(not_null)]
+            b: sqlite::Text,
+
+            #[rizzle(columns = "a,b")]
+            a_b_index: sqlite::UniqueIndex,
+        }
+
+        #[derive(RizzleSchema)]
+        struct Schema {
+            i: I,
+        }
+
+        let db0 = rizzle(db_options(), Schema::new()).await?;
+        assert_eq!(1, db0.index_names().await.len());
+
+        #[derive(Table)]
+        #[rizzle(table = "index_table")]
+        struct I2 {
+            #[rizzle(not_null)]
+            a: sqlite::Text,
+
+            #[rizzle(not_null)]
+            b: sqlite::Text,
+        }
+
+        #[derive(RizzleSchema)]
+        struct NewSchema {
+            i: I2,
+        }
+
+        let db1 = rizzle(db_options(), NewSchema::new()).await?;
+
+        assert_eq!(0, db1.index_names().await.len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drop_columns_works() -> Result<(), RizzleError> {
+        #[derive(Table)]
+        #[rizzle(table = "a")]
+        struct A {
+            col1: sqlite::Text,
+            col2: sqlite::Text,
+        }
+
+        #[derive(Table)]
+        #[rizzle(table = "a")]
+        struct A2 {
+            col1: sqlite::Text,
+        }
+
+        #[derive(RizzleSchema)]
+        struct Schema {
+            a: A,
+        }
+
+        #[derive(RizzleSchema)]
+        struct NewSchema {
+            a: A2,
+        }
+
+        let db0 = rizzle(db_options(), Schema::new()).await?;
+        let db1 = rizzle(db_options(), NewSchema::new()).await?;
+        assert_eq!(2, db0.columns().await.len());
+        assert_eq!(1, db1.columns().await.len());
+
+        Ok(())
     }
 
     #[test]
@@ -1171,9 +1262,8 @@ mod tests {
 
     #[tokio::test]
     async fn partial_select_works() -> Result<(), RizzleError> {
+        let Schema { users, .. } = Schema::new();
         let db = db().await;
-        let users = Users::new();
-        let _ = sync!(db, users).await?;
 
         #[derive(New, Row)]
         struct PartialUser {
@@ -1192,10 +1282,9 @@ mod tests {
 
     #[tokio::test]
     async fn inner_join_works() -> Result<(), RizzleError> {
-        let db = Database::connect("sqlite://:memory:").await?;
-        let users = Users::new();
-        let posts = Posts::new();
-        let result = sync!(db, users, posts).await?;
+        let schema = Schema::new();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, posts, .. } = schema;
         let rows = db
             .insert(users)
             .values(User {
@@ -1242,30 +1331,37 @@ mod tests {
         )
     }
 
-    #[derive(Insert, Default)]
-    struct NewUser {
-        name: String,
-        created_at: f64,
-        updated_at: f64,
-    }
-
     #[tokio::test]
     async fn insert_one_row_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let _ = sync!(db, users).await;
-        assert_eq!(1, db.table_names().await.len());
+        #[derive(Insert, Default)]
+        struct NewUser {
+            name: String,
+            created_at: f64,
+            updated_at: f64,
+        }
+
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, .. } = schema;
         let new_user = NewUser::default();
         let rows_affected = db.insert(users).values(new_user).rows_affected().await?;
         assert_eq!(1, rows_affected);
+
         Ok(())
     }
 
     #[tokio::test]
     async fn insert_one_row_with_returning_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let _ = sync!(db, users).await;
+        #[derive(Insert, Default)]
+        struct NewUser {
+            name: String,
+            created_at: f64,
+            updated_at: f64,
+        }
+
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, .. } = schema;
         let new_user = NewUser::default();
         let user = db
             .insert(users)
@@ -1279,9 +1375,16 @@ mod tests {
 
     #[tokio::test]
     async fn where_with_equals_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let _ = sync!(db, users).await?;
+        #[derive(Insert, Default)]
+        struct NewUser {
+            name: String,
+            created_at: f64,
+            updated_at: f64,
+        }
+
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, .. } = schema;
         let _ = db
             .insert(users)
             .values(NewUser::default())
@@ -1302,15 +1405,25 @@ mod tests {
 
     #[tokio::test]
     async fn update_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let _ = sync!(db, users).await?;
+        #[derive(Insert, Default)]
+        struct NewUser {
+            name: String,
+            created_at: f64,
+            updated_at: f64,
+        }
+
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, .. } = schema;
+
         let user = db
             .insert(users)
             .values(NewUser::default())
             .returning::<User>()
             .await?;
+
         assert_eq!(user.name, "");
+
         let updated_user = db
             .update(users)
             .set(User {
@@ -1321,16 +1434,26 @@ mod tests {
             .r#where(eq(users.id, 1))
             .returning::<User>()
             .await?;
+
         assert_eq!(updated_user.id, user.id);
         assert_eq!(updated_user.name, "new name");
+
         Ok(())
     }
 
     #[tokio::test]
     async fn delete_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let _ = sync!(db, users).await?;
+        #[derive(Insert, Default)]
+        struct NewUser {
+            name: String,
+            created_at: f64,
+            updated_at: f64,
+        }
+
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, .. } = schema;
+
         let user = db
             .insert(users)
             .values(NewUser::default())
@@ -1349,35 +1472,16 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Table, Clone, Copy)]
-    #[rizzle(table = "comments")]
-    struct Comments {
-        #[rizzle(primary_key)]
-        id: sqlite::Integer,
-
-        #[rizzle(not_null)]
-        body: sqlite::Text,
-
-        #[rizzle(references = "users(id)")]
-        author_id: sqlite::Integer,
-
-        #[rizzle(references = "posts(id)")]
-        post_id: sqlite::Integer,
-    }
-
-    #[derive(Row, Debug)]
-    struct Comment {
-        id: i64,
-        body: String,
-    }
-
     #[tokio::test]
     async fn derive_row_for_basic_crud() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let posts = Posts::new();
-        let comments = Comments::new();
-        let _ = sync!(db, users, posts, comments).await?;
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema {
+            users,
+            posts,
+            comments,
+        } = schema;
+
         let inserted_comment: Comment = db
             .insert(comments)
             .values(Comment {
@@ -1415,11 +1519,14 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_works() -> Result<(), RizzleError> {
-        let db = db().await;
-        let users = Users::new();
-        let posts = Posts::new();
-        let comments = Comments::new();
-        let _ = sync!(db, users, posts, comments).await?;
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema {
+            users,
+            posts,
+            comments,
+        } = schema;
+
         let insert = db.insert(comments).values(Comment {
             id: 1,
             body: "".to_owned(),
@@ -1457,9 +1564,10 @@ mod tests {
             id: i64,
             name: String,
         }
-        let users = Users::new();
-        let db = Database::connect("sqlite://:memory:").await?;
-        let _ = sync!(db, users).await?;
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, .. } = schema;
+
         let _ = db
             .insert(users)
             .values(User {
@@ -1493,10 +1601,10 @@ mod tests {
             posts: Vec<PullPost>,
         }
 
-        let users = Users::new();
-        let posts = Posts::new();
-        let db = Database::connect("sqlite://:memory:").await?;
-        let _sync = sync!(db, users, posts).await?;
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, posts, .. } = schema;
+
         let user: User = db
             .insert(users)
             .values(User {

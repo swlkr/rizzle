@@ -670,3 +670,51 @@ fn last_segment_from_type(ty: &Type) -> Option<Ident> {
         _ => None,
     }
 }
+
+#[proc_macro_derive(RizzleSchema, attributes(rizzle))]
+pub fn rizzle_schema(s: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(s as DeriveInput);
+    match rizzle_schema_macro(input) {
+        Ok(s) => s.to_token_stream().into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn rizzle_schema_macro(input: DeriveInput) -> Result<TokenStream2> {
+    let struct_name = input.ident;
+    let struct_fields = rizzle_fields(&input.data);
+    let new_fields = struct_fields
+        .iter()
+        .map(|field| {
+            let ident = field
+                .field
+                .ident
+                .as_ref()
+                .expect("Struct fields should have ");
+            let ty = &field.field.ty;
+            quote! { #ident: #ty::new() }
+        })
+        .collect::<Vec<_>>();
+    let tables = struct_fields
+        .iter()
+        .map(|field| {
+            let ident = &field.ident;
+            quote! { &self.#ident }
+        })
+        .collect::<Vec<_>>();
+    Ok(quote! {
+        impl RizzleSchema for #struct_name {
+            fn new() -> Self {
+                Self { #(#new_fields,)* }
+            }
+
+            fn sql(&self) -> String {
+                "".to_owned()
+            }
+
+            fn tables<'a>(&'a self) -> Vec<&'a dyn Table> {
+                vec![#(#tables,)*]
+            }
+        }
+    })
+}
