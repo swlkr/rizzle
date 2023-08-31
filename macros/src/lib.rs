@@ -15,6 +15,11 @@ pub fn table(s: TokenStream) -> TokenStream {
     }
 }
 
+enum Rel {
+    One(LitStr),
+    Many(LitStr),
+}
+
 #[derive(Default)]
 struct RizzleAttr {
     table_name: Option<LitStr>,
@@ -23,9 +28,9 @@ struct RizzleAttr {
     default_value: Option<LitStr>,
     columns: Option<LitStr>,
     references: Option<LitStr>,
-    many: Option<LitStr>,
     from: Option<LitStr>,
     to: Option<LitStr>,
+    rel: Option<Rel>,
 }
 
 impl Parse for RizzleAttr {
@@ -54,13 +59,16 @@ impl Parse for RizzleAttr {
                                     rizzle_attr.references = Some(lit_str.clone());
                                 }
                                 "many" => {
-                                    rizzle_attr.many = Some(lit_str.clone());
+                                    rizzle_attr.rel = Some(Rel::Many(lit_str.clone()));
                                 }
                                 "from" => {
                                     rizzle_attr.from = Some(lit_str.clone());
                                 }
                                 "to" => {
                                     rizzle_attr.to = Some(lit_str.clone());
+                                }
+                                "one" => {
+                                    rizzle_attr.rel = Some(Rel::One(lit_str.clone()));
                                 }
                                 _ => unimplemented!(),
                             }
@@ -561,39 +569,60 @@ pub fn pull(s: TokenStream) -> TokenStream {
     }
 }
 
+fn pull_select_sql(field: &RizzleField) -> TokenStream2 {
+    let field_ident = &field.ident_name;
+    let attr = field.attrs.first();
+    if let Some(RizzleAttr { from, to, rel, .. }) = attr {
+        let from = from.as_ref().expect("A pull struct requires a #[rizzle(from =\"table_name.foreign_key_column\")] attribute").token();
+        let to = to.as_ref().expect("A pull struct requires a #[rizzle(to = \"foreign_table_name.primary_key\")] attribute").token();
+        let rel = rel
+            .as_ref()
+            .expect("A pull struct requires a #rizzle(one = \"\" or many = \"\")] attribute");
+        match rel {
+            Rel::One(lit_str) => {
+                let type_ident = last_segment_from_type(&field.field.ty)
+                    .expect("Pull struct requires one fields to have named types");
+                let table = lit_str.token();
+                quote! {
+                    format!("'{}', (select {} from {} where {} = {})",
+                        #field_ident,
+                        #type_ident::default().json_object_sql(),
+                        #table,
+                        #from,
+                        #to
+                    )
+                }
+            }
+            Rel::Many(lit_str) => {
+                let table = lit_str.token();
+                let type_generic = field.vec_type.as_ref().expect(
+                    "Pulls structs only support Vec<T> of other structs which implement Pull",
+                );
+                let vec_ident = last_segment_from_type(&type_generic).unwrap();
+                quote! {
+                    format!("'{}', (select json_group_array({}) from {} where {} = {})",
+                        #field_ident,
+                        #vec_ident::default().json_object_sql(),
+                        #table,
+                        #from,
+                        #to
+                    )
+                }
+            }
+        }
+    } else {
+        quote! { format!("'{}', {}", #field_ident, #field_ident) }
+    }
+}
+
 fn pull_macro(input: DeriveInput) -> Result<TokenStream2> {
     let struct_name = input.ident;
     let struct_fields = rizzle_fields(&input.data);
     let json_object = struct_fields
         .iter()
-        .map(|field| {
-            let ident = &field.ident_name;
-            let attr = field.attrs.first();
-            match attr {
-                Some(RizzleAttr { many, from, to , ..}) => {
-                    let many= match many.as_ref() {
-                        Some(lit_str) => lit_str.value(),
-                        None => ident.to_string(),
-                    };
-                    let from = from.as_ref().expect("A pull struct requires a #[rizzle(from =\"table_name.foreign_key_column\")] attribute").token();
-                    let to = to.as_ref().expect("A pull struct requires a #[rizzle(to = \"foreign_table_name.primary_key\")] attribute").token();
-                    let type_generic = field.vec_type.as_ref().expect("Pulls structs only support Vec<T> of other structs which implement Pull");
-                    let vec_ident= last_segment_from_type(&type_generic).unwrap();
-                    quote! {
-                        format!(
-                            "'{}', (select json_group_array({}) from {} where {} = {})",
-                            #ident,
-                            #vec_ident::default().json_object_sql(),
-                            #many,
-                            #from,
-                            #to
-                        )
-                    }
-                }
-                _ => quote! { format!("'{}', {}", #ident, #ident) },
-            }
-        })
+        .map(|field| pull_select_sql(field))
         .collect::<Vec<_>>();
+
     Ok(quote! {
         impl FromRow<'_, sqlite::SqliteRow> for #struct_name {
             fn from_row(row: &sqlite::SqliteRow) -> Result<Self, sqlx::Error> {

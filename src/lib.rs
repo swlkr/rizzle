@@ -1597,7 +1597,7 @@ mod tests {
         struct PullUser {
             id: i64,
             name: String,
-            #[rizzle(from = "posts.user_id", to = "users.id")]
+            #[rizzle(many = "posts", from = "posts.user_id", to = "users.id")]
             posts: Vec<PullPost>,
         }
 
@@ -1656,6 +1656,63 @@ mod tests {
         assert_eq!(pull_post2.id, post1.id);
         assert_eq!(pull_post1.body, post.body);
         assert_eq!(pull_post2.body, post1.body);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pull_one_works() -> Result<(), RizzleError> {
+        #[derive(Pull, Deserialize, Default)]
+        struct PullPost {
+            id: i64,
+            body: String,
+            #[rizzle(one = "users", from = "users.id", to = "posts.id")]
+            user: PullUser,
+        }
+
+        #[derive(Pull, Deserialize, Default)]
+        struct PullUser {
+            id: i64,
+            name: String,
+        }
+
+        let schema = schema();
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { users, posts, .. } = schema;
+
+        let user: User = db
+            .insert(users)
+            .values(User {
+                id: 1,
+                name: "user1".to_owned(),
+                ..Default::default()
+            })
+            .returning()
+            .await?;
+
+        let post: Post = db
+            .insert(posts)
+            .values(Post {
+                id: 1,
+                body: "body1".to_owned(),
+                user_id: 1,
+                ..Default::default()
+            })
+            .returning()
+            .await?;
+
+        let query = db.pull(PullPost::default()).from(posts);
+        let sql = query.sql();
+        assert_eq!(
+            r#"select json_object('id', id, 'body', body, 'user', (select json_object('id', id, 'name', name) from users where users.id = posts.id)) as '__pull__' from posts"#,
+            sql
+        );
+
+        let rows: Vec<PullPost> = query.all().await?;
+        let row = rows.first().unwrap();
+        let user = &row.user;
+        assert_eq!(row.user.id, user.id);
+        assert_eq!(row.user.name, user.name);
 
         Ok(())
     }
