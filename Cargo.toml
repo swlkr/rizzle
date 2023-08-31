@@ -7,6 +7,7 @@ readme = "README.md"
 homepage = "https://github.com/swlkr/rizzle"
 repository = "https://github.com/swlkr/rizzle"
 keywords = ["drizzle", "rizzle", "orm", "database", "sqlite"]
+description = "A rust query builder and schema generator. Don't call it an ORM"
 
 
 [workspace]
