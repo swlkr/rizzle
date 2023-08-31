@@ -93,7 +93,8 @@ impl Parse for RizzleAttr {
 }
 
 struct RizzleField {
-    ident: String,
+    ident_name: String,
+    ident: Ident,
     field: Field,
     attrs: Vec<RizzleAttr>,
     type_string: String,
@@ -119,10 +120,10 @@ fn table_macro(input: DeriveInput) -> Result<TokenStream2> {
                 let ident = field
                     .ident
                     .as_ref()
-                    .expect("Struct fields should have names")
-                    .to_string();
+                    .expect("Struct fields should have names");
                 RizzleField {
-                    ident: ident.to_owned(),
+                    ident: ident.clone(),
+                    ident_name: ident.to_string(),
                     field: field.clone(),
                     attrs: field
                         .attrs
@@ -246,7 +247,7 @@ fn columns(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> 
         })
         .map(|field| {
             let ty = data_type(&field.type_string);
-            let ident = &field.ident;
+            let ident = &field.ident_name;
             if let Some(RizzleAttr {
                 primary_key,
                 not_null,
@@ -306,7 +307,7 @@ fn indexes(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> 
                 "UniqueIndex" => quote! { sqlite::IndexType::Unique },
                 _ => unimplemented!(),
             };
-            let name = &f.ident;
+            let name = &f.ident_name;
             let RizzleAttr { columns, .. } = f.attrs.last().unwrap();
             let column_names = match columns {
                 Some(lit_str) => quote! { #lit_str.to_string() },
@@ -566,7 +567,7 @@ fn pull_macro(input: DeriveInput) -> Result<TokenStream2> {
     let json_object = struct_fields
         .iter()
         .map(|field| {
-            let ident = &field.ident;
+            let ident = &field.ident_name;
             let attr = field.attrs.first();
             match attr {
                 Some(RizzleAttr { many, from, to , ..}) => {
@@ -619,10 +620,10 @@ fn rizzle_fields(data: &Data) -> Vec<RizzleField> {
                 let ident = field
                     .ident
                     .as_ref()
-                    .expect("Struct fields should have names")
-                    .to_string();
+                    .expect("Struct fields should have names");
                 RizzleField {
-                    ident: ident.to_owned(),
+                    ident: ident.clone(),
+                    ident_name: ident.to_string(),
                     field: field.clone(),
                     attrs: field
                         .attrs
