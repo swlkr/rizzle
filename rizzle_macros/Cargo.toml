@@ -1,0 +1,18 @@
+[package]
+name = "rizzle_macros"
+version = "0.1.0"
+edition = "2021"
+readme = "README.md"
+homepage = "https://github.com/swlkr/rizzle"
+repository = "https://github.com/swlkr/rizzle"
+keywords = ["rizzle_macros"]
+description = "Macros for the rizzle crate"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "1", features = ["full"] }
+proc-macro-error = "1"

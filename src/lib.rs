@@ -3,6 +3,7 @@ pub use sqlite::{DataValue, Database, DatabaseOptions};
 use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
 pub use sqlx::{FromRow, Row};
 use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
+pub use rizzle_macros::*;
 
 #[derive(FromRow)]
 struct ColumnDef {
@@ -915,7 +916,7 @@ pub async fn rizzle(
 mod tests {
     use super::*;
     use crate::sqlite::{eq, DataValue, Database, DatabaseOptions, Text};
-    use macros::{Insert, New, Pull, RizzleSchema, Row, Select, Table, Update};
+    use rizzle_macros::{Insert, New, Pull, RizzleSchema, Row, Select, Table, Update};
     use serde::de::DeserializeOwned;
     use serde::Deserialize;
     use std::sync::OnceLock;
