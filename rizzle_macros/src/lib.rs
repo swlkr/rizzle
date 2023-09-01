@@ -49,7 +49,7 @@ impl Parse for RizzleAttr {
                                 "table" => {
                                     rizzle_attr.table_name = Some(lit_str.clone());
                                 }
-                                "default" => {
+                                "r#default" => {
                                     rizzle_attr.default_value = Some(lit_str.clone());
                                 }
                                 "columns" => {
@@ -88,11 +88,11 @@ impl Parse for RizzleAttr {
                     {
                         "not_null" => rizzle_attr.not_null = true,
                         "primary_key" => rizzle_attr.primary_key = true,
-                        _ => unimplemented!(),
+                        _ => {}
                     },
-                    _ => unimplemented!(),
+                    _ => {}
                 },
-                _ => unimplemented!(),
+                _ => {}
             }
         }
 
@@ -265,7 +265,7 @@ fn columns(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> 
             }) = field.attrs.last()
             {
                 let default_value = match default_value {
-                    Some(default) => quote! { Some(#default) },
+                    Some(default) => quote! { Some(#default.to_owned()) },
                     None => quote! { None },
                 };
                 let references = match references {
@@ -551,7 +551,7 @@ fn row_macro(input: DeriveInput) -> Result<TokenStream2> {
         #update_token_stream
         #select_token_stream
         impl<'r> FromRow<'r, sqlite::SqliteRow> for #struct_name {
-            fn from_row(row: &'r sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+            fn from_row(row: &'r sqlite::SqliteRow) -> Result<Self, SqlxError> {
                 #(#gets)*
 
                 Ok(#struct_name { #(#attrs,)* })
