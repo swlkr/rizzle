@@ -459,7 +459,7 @@ pub mod sqlite {
                 .map(|idx| idx.0)
                 .collect::<Vec<_>>();
             let drop_indexes_sql = drop_indexes_sql(tables, index_names);
-            let _ = self.execute(&drop_indexes_sql);
+            let _ = self.execute(&drop_indexes_sql).await?;
 
             Ok(())
         }
