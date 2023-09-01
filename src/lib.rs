@@ -751,11 +751,15 @@ pub mod sqlite {
     }
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum RizzleError {
+    #[error("database error: `{0}`")]
     Database(String),
+    #[error("database connection error")]
     Connection,
+    #[error("database pool closed")]
     PoolClosed,
+    #[error("row not found")]
     RowNotFound,
 }
 
