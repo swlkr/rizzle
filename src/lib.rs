@@ -1,9 +1,9 @@
 #![allow(unused)]
+pub use rizzle_macros::*;
 pub use sqlite::{DataValue, Database, DatabaseOptions};
 use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
-pub use sqlx::{FromRow, Row};
+pub use sqlx::{Error as SqlxError, FromRow, Row};
 use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
-pub use rizzle_macros::*;
 
 #[derive(FromRow)]
 struct ColumnDef {
@@ -21,28 +21,28 @@ struct ColumnDef {
 
 #[derive(Default, PartialEq, Debug)]
 pub struct Column {
-    table_name: String,
-    default_value: Option<String>,
-    name: String,
-    not_null: bool,
-    primary_key: bool,
-    data_type: sqlite::DataType,
-    references: Option<String>,
+    pub table_name: String,
+    pub default_value: Option<String>,
+    pub name: String,
+    pub not_null: bool,
+    pub primary_key: bool,
+    pub data_type: sqlite::DataType,
+    pub references: Option<String>,
 }
 
 impl Column {
-    fn definition_sql(&self) -> String {
+    pub fn definition_sql(&self) -> String {
         let not_null = match self.not_null {
-            true => Some("not null"),
+            true => Some("not null".into()),
             false => None,
         };
         let primary_key = match self.primary_key {
-            true => Some("primary key"),
+            true => Some("primary key".into()),
             false => None,
         };
         let data_type = self.data_type.to_string();
         let default_value = match &self.default_value {
-            Some(s) => Some(s.as_str()),
+            Some(s) => Some(format!("default {}", s)),
             None => None,
         };
         let references = match &self.references {
@@ -50,12 +50,12 @@ impl Column {
             None => None,
         };
         vec![
-            Some(self.name.as_ref()),
-            Some(data_type.as_ref()),
+            Some(self.name.clone()),
+            Some(data_type),
             primary_key,
             not_null,
             default_value,
-            references.as_deref(),
+            references,
         ]
         .into_iter()
         .filter_map(|s| s)
@@ -63,7 +63,7 @@ impl Column {
         .join(" ")
     }
 
-    fn add_sql(&self) -> String {
+    pub fn add_sql(&self) -> String {
         format!(
             "alter table {} add column {};",
             self.table_name,
@@ -71,11 +71,11 @@ impl Column {
         )
     }
 
-    fn full_name(&self) -> String {
+    pub fn full_name(&self) -> String {
         format!("{} {}", self.table_name, self.name)
     }
 
-    fn drop_sql(&self) -> String {
+    pub fn drop_sql(&self) -> String {
         format!("alter table {} drop column {}", self.table_name, self.name)
     }
 }
@@ -122,14 +122,14 @@ impl From<ColumnDef> for Column {
 
 #[derive(Default)]
 pub struct Index {
-    table_name: String,
-    name: String,
-    index_type: sqlite::IndexType,
-    column_names: String,
+    pub table_name: String,
+    pub name: String,
+    pub index_type: sqlite::IndexType,
+    pub column_names: String,
 }
 
 impl Index {
-    fn create_sql(&self) -> String {
+    pub fn create_sql(&self) -> String {
         let unique = match &self.index_type {
             sqlite::IndexType::Plain => " ",
             sqlite::IndexType::Unique => " unique ",
