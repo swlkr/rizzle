@@ -10,25 +10,7 @@ rizzle is an automatic migration generator and query builder for sqlite (*postgr
 cargo add rizzle
 ```
 
-# Connect to database
-
-```rust
-use rizzle::prelude::*;
-
-#[tokio::main]
-async fn main() -> Result<(), RizzleError> {
-  let db = Database::connect("sqlite://:memory:").await?;
-
-  // if you need more options, you can use DatabaseOptions
-  use rizzle::sqlite::JournalMode;
-  let options = DatabaseOptions::new("sqlite://:memory:").max_connections(10).create_if_missing().journal_mode(JournalMode::Wal);
-  let db = Database::new(options).await?;
-
-  Ok(())
-}
-```
-
-# Declare your schema
+# Declare your schema and connect to database
 
 ```rust
 use rizzle::prelude::*;
@@ -56,11 +38,18 @@ struct Comments {
     post_id: Integer,
 }
 
+#[derive(RizzleSchema, Clone, Copy)]
+struct Schema {
+    posts: Posts,
+    comments: Comments
+}
+
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-  let db = Database::connect("sqlite://:memory:").await?;
-  let _ = sync!(db, posts, comments).await?;
-  Ok(())
+    let options = DatabaseOptions::new("sqlite://:memory:");
+    let schema = Schema::new();
+    let db = rizzle(options, schema).await?;
+    Ok(())
 }
 ```
 
@@ -77,8 +66,10 @@ struct Post {
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = Database::connect("sqlite://:memory:").await?;
-    let posts = Posts::new();
+    let options = DatabaseOptions::new("sqlite://:memory:");
+    let schema = Schema::new();
+    let db = rizzle(options, schema).await?;
+    let Schema { posts, .. } = schema;
 
     // insert into posts (id, body) values (?, ?) returning *
     let inserted_post: Post = db
@@ -122,8 +113,10 @@ struct Comment {
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = Database::connect("sqlite://:memory:").await?;
-    let comments = Comments::new();
+    let options = DatabaseOptions::new("sqlite://:memory:");
+    let schema = Schema::new();
+    let db = rizzle(options, schema).await?;
+    let Schema { comments, .. } = schema;
 
     // select * from comments
     let rows: Vec<Comment> = db.select().from(comments).all().await;
@@ -137,16 +130,18 @@ async fn main() -> Result<(), RizzleError> {
 ```rust
 use rizzle::prelude::*;
 
-#[derive(New, Select)]
+#[derive(Select, Default)]
 struct PartialComment {
   body: String
 }
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let db = Database::connect("sqlite://:memory:").await?;
-    let comments = Comments::new();
-    let partial_comment = PartialComment::new();
+    let options = DatabaseOptions::new("sqlite://:memory:");
+    let schema = Schema::new();
+    let db = rizzle(options, schema).await?;
+    let Schema { comments, .. } = schema;
+    let partial_comment = PartialComment::default();
 
     // select body from comments
     let partial_rows: Vec<PartialComment> = db.select_with(partial_comment).from(comments).all().await;
@@ -162,10 +157,10 @@ use rizzle::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let posts = Posts::new();
-    let comments = Comments::new();
-
-    let db = Database::connect("sqlite://:memory:").await?;
+    let options = DatabaseOptions::new("sqlite://:memory:");
+    let schema = Schema::new();
+    let db = rizzle(options, schema).await?;
+    let Schema { comments, posts } = schema;
 
     // select * from comments inner join posts on posts.id = comments.post_id
     let rows: Vec<Comment> = db
@@ -186,8 +181,10 @@ use rizzle::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
-    let comments = Comments::new();
-    let db = Database::connect("sqlite://:memory:").await?;
+    let options = DatabaseOptions::new("sqlite://:memory:");
+    let schema = Schema::new();
+    let db = rizzle(options, schema).await?;
+    let Schema { comments, .. } = schema;
 
     // select * from comments
     let query = db.select().from(comments);
