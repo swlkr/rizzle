@@ -1,9 +1,22 @@
 #![allow(unused)]
 pub use rizzle_macros::*;
+pub use serde_json;
 pub use sqlite::{DataValue, Database, DatabaseOptions};
 use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
 pub use sqlx::{Error as SqlxError, FromRow, Row};
 use std::{collections::HashSet, fmt::Display, rc::Rc, time::Duration};
+
+pub mod prelude {
+    pub use crate::rizzle;
+    pub use crate::{
+        on,
+        sqlite::{self, eq, Integer, JournalMode, Real, Synchronous, Text, UniqueIndex},
+        Column, DataValue, DatabaseOptions, FromRow, Index, Insert, Pull, Reference, RizzleError,
+        RizzleSchema, Row, Select, SqlxError, Table, Update,
+    };
+    pub use serde::{Deserialize, Serialize};
+    pub use serde_json;
+}
 
 #[derive(FromRow)]
 struct ColumnDef {
@@ -143,16 +156,16 @@ impl Index {
 
 #[derive(FromRow, Default)]
 pub struct Reference {
-    clause: String,
-    id: i64,
-    seq: i64,
-    many: bool,
-    table: String,
-    from: String,
-    to: String,
-    on_update: String,
-    on_delete: String,
-    r#match: String,
+    pub clause: String,
+    pub id: i64,
+    pub seq: i64,
+    pub many: bool,
+    pub table: String,
+    pub from: String,
+    pub to: String,
+    pub on_update: String,
+    pub on_delete: String,
+    pub r#match: String,
 }
 
 pub trait RizzleSchema {
@@ -815,7 +828,7 @@ pub trait Update {
     fn update_sql(&self) -> String;
 }
 
-fn on(left: &str, right: &str) -> String {
+pub fn on(left: &str, right: &str) -> String {
     format!("{} = {}", left, right)
 }
 
@@ -918,11 +931,7 @@ pub async fn rizzle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::sqlite::{eq, DataValue, Database, DatabaseOptions, Text};
-    use rizzle_macros::{Insert, New, Pull, RizzleSchema, Row, Select, Table, Update};
-    use serde::de::DeserializeOwned;
-    use serde::Deserialize;
+    use crate::prelude::*;
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1552,8 +1561,8 @@ mod tests {
             id: i64,
             body: String,
         }
-        let users = Users::new();
-        let db = Database::connect("sqlite://:memory:").await?;
+        let Schema { users, .. } = schema();
+        let db = rizzle(db_options(), schema()).await?;
         let sql = db.pull(PullUser::default()).from(users).sql();
         assert_eq!(
             "select json_object('id', id, 'body', body) as '__pull__' from users",

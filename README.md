@@ -13,7 +13,7 @@ cargo add rizzle
 # Connect to database
 
 ```rust
-use rizzle::Database;
+use rizzle::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
@@ -31,7 +31,7 @@ async fn main() -> Result<(), RizzleError> {
 # Declare your schema
 
 ```rust
-use rizzle::{Database, Table, sync, sqlite::{Text, Integer}, RizzleError};
+use rizzle::prelude::*;
 
 #[derive(Table, Clone, Copy)]
 #[rizzle(table = "posts")]
@@ -67,6 +67,8 @@ async fn main() -> Result<(), RizzleError> {
 # Inserting, updating, and deleting rows
 
 ```rust
+use rizzle::prelude::*;
+
 #[derive(Row)]
 struct Post {
   id: i64,
@@ -109,6 +111,8 @@ async fn main() -> Result<(), RizzleError> {
 # Selecting rows with *
 
 ```rust
+use rizzle::prelude::*;
+
 #[derive(Row)]
 struct Comment {
     id: i64,
@@ -131,6 +135,8 @@ async fn main() -> Result<(), RizzleError> {
 # Selecting specific columns
 
 ```rust
+use rizzle::prelude::*;
+
 #[derive(New, Select)]
 struct PartialComment {
   body: String
@@ -152,6 +158,8 @@ async fn main() -> Result<(), RizzleError> {
 # Joins
 
 ```rust
+use rizzle::prelude::*;
+
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let posts = Posts::new();
@@ -174,6 +182,8 @@ async fn main() -> Result<(), RizzleError> {
 # Prepared statements
 
 ```rust
+use rizzle::prelude::*;
+
 #[tokio::main]
 async fn main() -> Result<(), RizzleError> {
     let comments = Comments::new();

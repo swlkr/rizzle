@@ -625,9 +625,9 @@ fn pull_macro(input: DeriveInput) -> Result<TokenStream2> {
 
     Ok(quote! {
         impl FromRow<'_, sqlite::SqliteRow> for #struct_name {
-            fn from_row(row: &sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+            fn from_row(row: &sqlite::SqliteRow) -> Result<Self, SqlxError> {
                 let json = &row.try_get::<String, &str>("__pull__")?;
-                let row = serde_json::from_str(json).map_err(|e| sqlx::Error::ColumnNotFound(format!("{}", e)))?;
+                let row = serde_json::from_str(json).map_err(|e| SqlxError::ColumnNotFound(format!("{}", e)))?;
                 Ok(row)
             }
         }
