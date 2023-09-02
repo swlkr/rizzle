@@ -1027,7 +1027,7 @@ mod tests {
         Schema::new()
     }
 
-    async fn db() -> Database {
+    async fn db() -> crate::sqlite::Database {
         rizzle(db_options(), schema()).await.unwrap()
     }
 
@@ -1279,13 +1279,13 @@ mod tests {
         let Schema { users, .. } = Schema::new();
         let db = db().await;
 
-        #[derive(New, Row)]
+        #[derive(Row, Default)]
         struct PartialUser {
             id: i64,
             name: String,
         }
 
-        let partial_user = PartialUser::new();
+        let partial_user = PartialUser::default();
         let query = db.select_with(partial_user).from(users);
 
         assert_eq!("select id, name from users", query.sql());
