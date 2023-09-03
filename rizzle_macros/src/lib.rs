@@ -1,9 +1,12 @@
+use std::collections::HashSet;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens};
+use quote::{quote, quote_spanned, ToTokens};
 use syn::{
-    parse::Parse, parse_macro_input, Data, DeriveInput, Expr, ExprAssign, ExprLit, ExprPath, Field,
-    GenericArgument, Ident, Lit, LitStr, Path, PathArguments, PathSegment, Result, Type, TypePath,
+    parse::Parse, parse_macro_input, spanned::Spanned, Data, DeriveInput, Expr, ExprAssign,
+    ExprLit, ExprPath, Field, GenericArgument, Ident, Lit, LitStr, Path, PathArguments,
+    PathSegment, Result, Type, TypePath,
 };
 
 #[proc_macro_derive(Table, attributes(rizzle))]
@@ -299,6 +302,14 @@ fn columns(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> 
 }
 
 fn indexes(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> {
+    let column_names = fields
+        .iter()
+        .filter(|f| match f.type_string.as_ref() {
+            "Text" | "Integer" | "Real" | "Blob" => true,
+            _ => false,
+        })
+        .map(|f| f.ident_name.clone())
+        .collect::<HashSet<_>>();
     fields
         .iter()
         .filter(|f| match f.type_string.as_ref() {
@@ -310,23 +321,48 @@ fn indexes(table_name: &String, fields: &Vec<RizzleField>) -> Vec<TokenStream2> 
             None => false,
         })
         .map(|f| {
-            let ty = match f.type_string.as_ref() {
-                "Index" => quote! { sqlite::IndexType::Plain },
-                "UniqueIndex" => quote! { sqlite::IndexType::Unique },
-                _ => unimplemented!(),
-            };
             let name = &f.ident_name;
-            let RizzleAttr { columns, .. } = f.attrs.last().unwrap();
-            let column_names = match columns {
-                Some(lit_str) => quote! { #lit_str.to_string() },
-                None => quote! { "".to_string() },
+            let attr = f.attrs.last().unwrap();
+            let RizzleAttr { columns, .. } = attr;
+            let attr_column_names = match columns {
+                Some(lit_str) => lit_str.value(),
+                None => String::default(),
             };
-            quote! {
-                Index {
-                    table_name: #table_name.to_string(),
-                    name: #name.to_string(),
-                    index_type: #ty,
-                    column_names: #column_names
+            let names = attr_column_names
+                .split(",")
+                .map(|x| x.to_owned())
+                .collect::<HashSet<_>>();
+            let diff = &names.difference(&column_names).collect::<Vec<_>>();
+            let column_names_list = column_names
+                .iter()
+                .map(|x| format!("- {}", x))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let compiler_error = format!(
+                "index {:?} on {:?} in table {:?} which only declares \n{}",
+                name, diff, table_name, column_names_list
+            );
+            if diff.len() != 0 {
+                quote_spanned! {
+                    columns.span() => compile_error!(#compiler_error)
+                }
+            } else {
+                let column_names = match columns {
+                    Some(lit_str) => quote! { #lit_str.to_string() },
+                    None => quote! { "".to_string() },
+                };
+                let ty = match f.type_string.as_ref() {
+                    "Index" => quote! { sqlite::IndexType::Plain },
+                    "UniqueIndex" => quote! { sqlite::IndexType::Unique },
+                    _ => unimplemented!(),
+                };
+                quote! {
+                    Index {
+                        table_name: #table_name.to_string(),
+                        name: #name.to_string(),
+                        index_type: #ty,
+                        column_names: #column_names
+                    }
                 }
             }
         })
