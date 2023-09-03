@@ -803,7 +803,7 @@ impl From<sqlx::Error> for RizzleError {
 #[derive(FromRow, Debug)]
 pub struct TableName(String);
 
-#[derive(FromRow, Debug)]
+#[derive(FromRow, Debug, PartialEq)]
 pub struct IndexName(String);
 
 pub trait New {
@@ -935,7 +935,7 @@ mod tests {
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[derive(Table, Clone, Copy)]
+    #[derive(Table, Default, Clone, Copy)]
     #[rizzle(table = "users")]
     struct Users {
         #[rizzle(primary_key)]
@@ -951,10 +951,10 @@ mod tests {
         updated_at: sqlite::Real,
 
         #[rizzle(columns = "name")]
-        name_index: sqlite::UniqueIndex,
+        users_name_index: sqlite::UniqueIndex,
     }
 
-    #[derive(Table, Clone, Copy)]
+    #[derive(Table, Clone, Copy, Default)]
     #[rizzle(table = "posts")]
     struct Posts {
         #[rizzle(primary_key)]
@@ -1202,7 +1202,10 @@ mod tests {
         }
 
         let db0 = rizzle(db_options(), Schema::new()).await?;
-        assert_eq!(1, db0.index_names().await.len());
+        assert_eq!(
+            vec![super::IndexName("a_b_index".to_owned())],
+            db0.index_names().await
+        );
 
         #[derive(Table)]
         #[rizzle(table = "index_table")]
