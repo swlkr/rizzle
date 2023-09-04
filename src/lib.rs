@@ -1,6 +1,5 @@
 #![allow(unused)]
 pub use rizzle_macros::*;
-pub use serde_json;
 pub use sqlite::{DataValue, Database, DatabaseOptions};
 use sqlx::{query_as, Arguments, Encode, Executor, IntoArguments};
 pub use sqlx::{Error as SqlxError, FromRow, Row};
@@ -11,11 +10,9 @@ pub mod prelude {
     pub use crate::{
         on,
         sqlite::{self, eq, Integer, JournalMode, Real, Synchronous, Text, UniqueIndex},
-        Column, DataValue, DatabaseOptions, FromRow, Index, Insert, Pull, Reference, RizzleError,
+        Column, DataValue, DatabaseOptions, FromRow, Index, Insert, Reference, RizzleError,
         RizzleSchema, Row, Select, SqlxError, Table, Update,
     };
-    pub use serde::{Deserialize, Serialize};
-    pub use serde_json;
 }
 
 #[derive(FromRow)]
@@ -496,10 +493,6 @@ pub mod sqlite {
         pub fn delete(&self, delete: impl Table) -> Query {
             Query::new(self.pool.clone()).delete(delete.name())
         }
-
-        pub fn pull(&self, st: impl Pull) -> Query {
-            Query::new(self.pool.clone()).pull(st)
-        }
     }
 
     pub struct Bind {
@@ -552,6 +545,7 @@ pub mod sqlite {
 
     pub struct Query {
         pool: Pool,
+        select_with: Option<String>,
         sql: String,
         values: Vec<DataValue>,
     }
@@ -560,6 +554,7 @@ pub mod sqlite {
         fn new(pool: Pool) -> Self {
             Self {
                 pool,
+                select_with: None,
                 sql: String::new(),
                 values: vec![],
             }
@@ -580,13 +575,28 @@ pub mod sqlite {
         }
 
         pub fn select_with(mut self, sel: impl Select) -> Self {
-            self.push(sel.select_sql());
+            self.select_with = Some(sel.columns_sql());
             self
         }
 
         pub fn from(mut self, table: impl Table) -> Self {
-            let sql = format!("from {}", table.name());
-            self.push(sql);
+            if let Some(select_with) = &self.select_with {
+                let sql = select_with
+                    .split(",")
+                    .map(|col| col.trim())
+                    .map(|col| {
+                        if col.contains(".") {
+                            col.to_owned()
+                        } else {
+                            format!("{}.{}", table.name(), col)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.push(format!("select {}", sql));
+            }
+            let from_sql = format!("from {}", table.name());
+            self.push(from_sql);
             self
         }
 
@@ -749,11 +759,6 @@ pub mod sqlite {
             self.push(format!("delete from {}", table_name));
             self
         }
-
-        fn pull(mut self, st: impl Pull) -> Query {
-            self.push(format!("select {} as '__pull__'", st.json_object_sql()));
-            self
-        }
     }
 
     pub fn eq(left: &str, right: impl Into<DataValue>) -> Bind {
@@ -811,11 +816,8 @@ pub trait New {
 }
 
 pub trait Select {
-    fn select_sql(&self) -> String;
-}
-
-pub trait Pull {
-    fn json_object_sql(&self) -> String;
+    fn column_names_sql() -> String;
+    fn columns_sql(&self) -> String;
 }
 
 pub trait Insert {
@@ -996,7 +998,7 @@ mod tests {
         comments: Comments,
     }
 
-    #[derive(Row, Default, Debug)]
+    #[derive(Row, Default, Debug, Clone)]
     struct User {
         id: i64,
         name: String,
@@ -1004,13 +1006,15 @@ mod tests {
         updated_at: f64,
     }
 
-    #[derive(Row, Default, Debug)]
+    #[derive(Row, Clone, Default, Debug)]
     struct Post {
         id: i64,
         body: String,
         created_at: f64,
         updated_at: f64,
         user_id: i64,
+        #[rizzle(one = "users")]
+        user: User,
     }
 
     #[derive(Row, Debug)]
@@ -1291,7 +1295,7 @@ mod tests {
         let partial_user = PartialUser::default();
         let query = db.select_with(partial_user).from(users);
 
-        assert_eq!("select id, name from users", query.sql());
+        assert_eq!("select users.id, users.name from users", query.sql());
         let partial_users: Vec<PartialUser> = query.all().await?;
         assert_eq!(partial_users.len(), 0);
         Ok(())
@@ -1558,178 +1562,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_sql_works() -> Result<(), RizzleError> {
-        #[derive(Pull, Deserialize, Default)]
-        struct PullUser {
+    async fn nested_struct_as_fk_select_with_works() -> Result<(), RizzleError> {
+        let db = rizzle(db_options(), schema()).await?;
+        let Schema { users, posts, .. } = schema();
+
+        #[derive(Select, Debug, Default)]
+        struct Post1 {
             id: i64,
             body: String,
+            user_id: i64,
+            #[rizzle(one = "users")]
+            user: User,
         }
-        let Schema { users, .. } = schema();
-        let db = rizzle(db_options(), schema()).await?;
-        let sql = db.pull(PullUser::default()).from(users).sql();
-        assert_eq!(
-            "select json_object('id', id, 'body', body) as '__pull__' from users",
-            sql
-        );
-        Ok(())
-    }
 
-    #[tokio::test]
-    async fn pull_top_level_works() -> Result<(), RizzleError> {
-        #[derive(Pull, Deserialize, Default)]
-        struct PullUser {
-            id: i64,
-            name: String,
-        }
-        let schema = schema();
-        let db = rizzle(db_options(), schema).await?;
-        let Schema { users, .. } = schema;
-
+        let new_user = User {
+            id: 1,
+            name: "user1".to_owned(),
+            ..Default::default()
+        };
+        let new_post = Post {
+            id: 1,
+            body: "post1".to_owned(),
+            user_id: 1,
+            ..Default::default()
+        };
         let _ = db
             .insert(users)
-            .values(User {
-                id: 1,
-                name: "name".to_string(),
-                created_at: 0.0,
-                updated_at: 0.0,
-            })
+            .values(new_user.clone())
             .rows_affected()
             .await?;
-        let rows: Vec<PullUser> = db.pull(PullUser::default()).from(users).all().await?;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows.first().unwrap().id, 1);
-        assert_eq!(rows.first().unwrap().name, "name");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pull_one_level_vec_sql_works() -> Result<(), RizzleError> {
-        #[derive(Pull, Deserialize, Default)]
-        struct PullPost {
-            id: i64,
-            body: String,
-        }
-
-        #[derive(Pull, Deserialize, Default)]
-        struct PullUser {
-            id: i64,
-            name: String,
-            #[rizzle(many = "posts", from = "posts.user_id", to = "users.id")]
-            posts: Vec<PullPost>,
-        }
-
-        let schema = schema();
-        let db = rizzle(db_options(), schema).await?;
-        let Schema { users, posts, .. } = schema;
-
-        let user: User = db
-            .insert(users)
-            .values(User {
-                id: 1,
-                name: "user1".to_owned(),
-                ..Default::default()
-            })
-            .returning()
-            .await?;
-
-        let post: Post = db
+        let _ = db
             .insert(posts)
-            .values(Post {
-                id: 1,
-                body: "body1".to_owned(),
-                user_id: 1,
-                ..Default::default()
-            })
-            .returning()
+            .values(new_post.clone())
+            .rows_affected()
             .await?;
 
-        let post1: Post = db
-            .insert(posts)
-            .values(Post {
-                id: 2,
-                body: "body2".to_owned(),
-                user_id: 1,
-                ..Default::default()
-            })
-            .returning()
-            .await?;
+        let query = db
+            .select_with(Post1::default())
+            .from(posts)
+            .inner_join(users, on(users.id, posts.user_id));
 
-        let query = db.pull(PullUser::default()).from(users);
-        let sql = query.sql();
         assert_eq!(
-            r#"select json_object('id', id, 'name', name, 'posts', (select json_group_array(json_object('id', id, 'body', body)) from posts where posts.user_id = users.id)) as '__pull__' from users"#,
-            sql
+            r#"select posts.id, posts.body, posts.user_id, users.id as 'User_id', users.name as 'User_name', users.created_at as 'User_created_at', users.updated_at as 'User_updated_at' from posts inner join users on users.id = posts.user_id"#,
+            query.sql()
         );
 
-        let rows: Vec<PullUser> = query.all().await?;
-        let row = rows.first().unwrap();
-        let posts = &row.posts;
-        let pull_post1 = row.posts.first().unwrap();
-        let pull_post2 = row.posts.iter().nth(1).unwrap();
-        assert_eq!(row.id, user.id);
-        assert_eq!(row.name, user.name);
-        assert_eq!(posts.len(), 2);
-        assert_eq!(pull_post1.id, post.id);
-        assert_eq!(pull_post2.id, post1.id);
-        assert_eq!(pull_post1.body, post.body);
-        assert_eq!(pull_post2.body, post1.body);
+        let posts: Vec<Post1> = query.all().await?;
+        let post = posts.first().unwrap();
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pull_one_works() -> Result<(), RizzleError> {
-        #[derive(Pull, Deserialize, Default)]
-        struct PullPost {
-            id: i64,
-            body: String,
-            #[rizzle(one = "users", from = "users.id", to = "posts.id")]
-            user: PullUser,
-        }
-
-        #[derive(Pull, Deserialize, Default)]
-        struct PullUser {
-            id: i64,
-            name: String,
-        }
-
-        let schema = schema();
-        let db = rizzle(db_options(), schema).await?;
-        let Schema { users, posts, .. } = schema;
-
-        let user: User = db
-            .insert(users)
-            .values(User {
-                id: 1,
-                name: "user1".to_owned(),
-                ..Default::default()
-            })
-            .returning()
-            .await?;
-
-        let post: Post = db
-            .insert(posts)
-            .values(Post {
-                id: 1,
-                body: "body1".to_owned(),
-                user_id: 1,
-                ..Default::default()
-            })
-            .returning()
-            .await?;
-
-        let query = db.pull(PullPost::default()).from(posts);
-        let sql = query.sql();
-        assert_eq!(
-            r#"select json_object('id', id, 'body', body, 'user', (select json_object('id', id, 'name', name) from users where users.id = posts.id)) as '__pull__' from posts"#,
-            sql
-        );
-
-        let rows: Vec<PullPost> = query.all().await?;
-        let row = rows.first().unwrap();
-        let user = &row.user;
-        assert_eq!(row.user.id, user.id);
-        assert_eq!(row.user.name, user.name);
+        assert_eq!(post.id, new_post.id);
+        assert_eq!(post.body, new_post.body);
+        assert_eq!(post.user.id, new_user.id);
+        assert_eq!(post.user.name, new_user.name);
 
         Ok(())
     }
