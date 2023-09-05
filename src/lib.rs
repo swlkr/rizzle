@@ -216,6 +216,10 @@ pub mod sqlite {
         Integer(i64),
         Real(f64),
         Text(String),
+        NullText(Option<String>),
+        NullReal(Option<f64>),
+        NullInteger(Option<i64>),
+        NullBlob(Option<Vec<u8>>),
     }
 
     impl From<i64> for DataValue {
@@ -245,6 +249,39 @@ pub mod sqlite {
     impl From<Vec<u8>> for DataValue {
         fn from(value: Vec<u8>) -> Self {
             Self::Blob(value)
+        }
+    }
+
+    impl From<Option<i64>> for DataValue {
+        fn from(value: Option<i64>) -> Self {
+            Self::NullInteger(value)
+        }
+    }
+
+    impl From<Option<&str>> for DataValue {
+        fn from(value: Option<&str>) -> Self {
+            match value {
+                Some(val) => Self::NullText(Some(val.to_owned())),
+                None => Self::NullText(None),
+            }
+        }
+    }
+
+    impl From<Option<String>> for DataValue {
+        fn from(value: Option<String>) -> Self {
+            Self::NullText(value)
+        }
+    }
+
+    impl From<Option<f64>> for DataValue {
+        fn from(value: Option<f64>) -> Self {
+            Self::NullReal(value)
+        }
+    }
+
+    impl From<Option<Vec<u8>>> for DataValue {
+        fn from(value: Option<Vec<u8>>) -> Self {
+            Self::NullBlob(value)
         }
     }
 
@@ -666,6 +703,10 @@ pub mod sqlite {
                     DataValue::Integer(integer) => query.bind(integer),
                     DataValue::Real(real) => query.bind(real),
                     DataValue::Text(text) => query.bind(text),
+                    DataValue::NullText(val) => query.bind(val),
+                    DataValue::NullReal(val) => query.bind(val),
+                    DataValue::NullInteger(val) => query.bind(val),
+                    DataValue::NullBlob(val) => query.bind(val),
                 };
             }
             let result = query.execute(&self.pool).await?;
@@ -682,6 +723,10 @@ pub mod sqlite {
                     DataValue::Integer(integer) => query.bind(integer),
                     DataValue::Real(real) => query.bind(real),
                     DataValue::Text(text) => query.bind(text),
+                    DataValue::NullText(val) => query.bind(val),
+                    DataValue::NullReal(val) => query.bind(val),
+                    DataValue::NullInteger(val) => query.bind(val),
+                    DataValue::NullBlob(val) => query.bind(val),
                 };
             }
             query
@@ -700,6 +745,10 @@ pub mod sqlite {
                     DataValue::Integer(integer) => query.bind(integer),
                     DataValue::Real(real) => query.bind(real),
                     DataValue::Text(text) => query.bind(text),
+                    DataValue::NullText(val) => query.bind(val),
+                    DataValue::NullReal(val) => query.bind(val),
+                    DataValue::NullInteger(val) => query.bind(val),
+                    DataValue::NullBlob(val) => query.bind(val),
                 };
             }
             query
@@ -1566,7 +1615,7 @@ mod tests {
         let db = rizzle(db_options(), schema()).await?;
         let Schema { users, posts, .. } = schema();
 
-        #[derive(Select, Debug, Default)]
+        #[derive(Row, Debug, Default)]
         struct Post1 {
             id: i64,
             body: String,
@@ -1614,6 +1663,55 @@ mod tests {
         assert_eq!(post.body, new_post.body);
         assert_eq!(post.user.id, new_user.id);
         assert_eq!(post.user.name, new_user.name);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn option_works() -> Result<(), RizzleError> {
+        #[derive(Table, Clone, Copy)]
+        #[rizzle(table = "workouts")]
+        struct Workouts {
+            #[rizzle(primary_key)]
+            workout_id: Integer,
+            updated_at: Real,
+        }
+
+        #[derive(RizzleSchema, Clone, Copy)]
+        struct Schema {
+            workouts: Workouts,
+        }
+
+        let schema = Schema {
+            workouts: Workouts::new(),
+        };
+        let db = rizzle(db_options(), schema).await?;
+        let Schema { workouts } = schema;
+
+        #[derive(Row)]
+        struct Workout {
+            workout_id: i64,
+            updated_at: Option<f64>,
+        }
+
+        let new_workout = Workout {
+            workout_id: 1,
+            updated_at: None,
+        };
+        let workout: Workout = db.insert(workouts).values(new_workout).returning().await?;
+
+        assert_eq!(workout.workout_id, 1);
+        assert_eq!(workout.updated_at, None);
+
+        let updated_at = Some(now());
+        let new_workout = Workout {
+            workout_id: 2,
+            updated_at,
+        };
+        let workout: Workout = db.insert(workouts).values(new_workout).returning().await?;
+
+        assert_eq!(workout.workout_id, 2);
+        assert_eq!(workout.updated_at, updated_at);
 
         Ok(())
     }
