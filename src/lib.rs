@@ -409,7 +409,10 @@ pub mod sqlite {
         pub async fn index_names(&self) -> Vec<IndexName> {
             let sql = "select name from sqlite_schema where type = 'index'";
             match query_as(sql).fetch_all(&self.pool).await {
-                Ok(names) => names,
+                Ok(names) => names
+                    .into_iter()
+                    .filter(|index_name: &IndexName| !index_name.0.contains("sqlite_autoindex"))
+                    .collect::<Vec<_>>(),
                 Err(_) => vec![],
             }
         }
@@ -1712,6 +1715,30 @@ mod tests {
 
         assert_eq!(workout.workout_id, 2);
         assert_eq!(workout.updated_at, updated_at);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_primary_key_works() -> Result<(), RizzleError> {
+        #[derive(Table, Clone, Copy)]
+        #[rizzle(table = "workouts")]
+        struct Workouts {
+            #[rizzle(primary_key)]
+            workout_id: Text,
+        }
+
+        #[derive(RizzleSchema, Clone, Copy)]
+        struct Schema {
+            workouts: Workouts,
+        }
+
+        let schema = Schema {
+            workouts: Workouts::new(),
+        };
+        let db = rizzle(db_options(), schema).await?;
+
+        assert!(true);
 
         Ok(())
     }
